@@ -1,0 +1,15 @@
+=== health ===
+{"ok":true,"service":"mathoi-agent"}
+
+admin login: role=admin use_default=True
+admin me: use_default=True
+admin stats: users=3 tasks=1 calls=8
+admin models:
+  default: model=mimo-v2.5-pro
+  modeler: model=deepseek-chat
+  coder: model=deepseek-coder
+  writer: model=deepseek-chat
+
+user login: use_default=True
+user models: use_default=True agents=default modeler coder writer
+user me: use_default=True

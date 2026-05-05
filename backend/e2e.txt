@@ -1,0 +1,29 @@
+=== health ===
+{"ok":true,"service":"mathoi-agent"}
+
+=== admin login ===
+role=admin
+
+=== admin stats ===
+users=3 tasks=1 calls=8
+
+=== admin models ===
+agent=default model=mimo-v2.5-pro key=True
+agent=modeler model=deepseek-chat key=True
+agent=coder model=deepseek-coder key=True
+agent=writer model=deepseek-chat key=True
+
+=== user login testuser99 ===
+token_len=192 use_default=
+
+=== user me ===
+username=testuser99
+
+=== user my models ===
+FAIL my models: 远程服务器返回错误: (404) 未找到。
+
+=== admin users ===
+count=3
+
+=== admin usage ===
+total_calls= total_tokens=

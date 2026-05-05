@@ -1,0 +1,456 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useStore } from '../store'
+import { api, Task, TraceEvent } from '../api'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import clsx from 'clsx'
+
+// ---- 颜色映射 ----
+const AGENT_BADGE: Record<string, string> = {
+  modeler: 'bg-purple-100 text-purple-700 border-purple-200',
+  coder:   'bg-blue-100 text-blue-700 border-blue-200',
+  writer:  'bg-emerald-100 text-emerald-700 border-emerald-200',
+}
+const AGENT_BORDER: Record<string, string> = {
+  modeler: 'border-l-purple-400',
+  coder:   'border-l-blue-400',
+  writer:  'border-l-emerald-400',
+  sandbox: 'border-l-ink-500',
+}
+
+const fmtN = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
+
+// ==============================
+// 实时状态栏
+// ==============================
+function LiveStatus({ events, current }: { events: TraceEvent[]; current: Task | null }) {
+  const [elapsed, setElapsed] = useState(0)
+
+  useEffect(() => {
+    if (!current) return
+    const start = current.created_at
+    setElapsed(Date.now() / 1000 - start)
+    if (current.state === 'completed' || current.state === 'failed') return
+    const t = setInterval(() => setElapsed(Date.now() / 1000 - start), 1000)
+    return () => clearInterval(t)
+  }, [current?.task_id, current?.state, current?.created_at])
+
+  if (!current) return null
+
+  // 跳过 llm_usage / thinking，找最新可视事件
+  const lastVisible = [...events].reverse().find(
+    e => e.type !== 'agent.llm_usage' && e.type !== 'agent.thinking'
+  )
+  const lastThinking = events.at(-1)?.type === 'agent.thinking' ? events.at(-1) : null
+  const currentPhase = [...events].reverse().find(e => e.type === 'phase.enter')?.payload?.phase
+
+  const isActive = current.state === 'running'
+
+  const statusLabel = () => {
+    if (current.state === 'completed') return '✓ 任务完成'
+    if (current.state === 'failed')    return `✗ 失败：${current.error || ''}`
+    if (current.state === 'paused')    return '⏸ 已暂停'
+    if (current.state === 'awaiting_hitl') return '⏸ 等待人工介入'
+    if (lastThinking) return `${lastThinking.agent} 正在思考（第 ${lastThinking.payload?.step} 步）`
+    if (lastVisible?.type === 'agent.tool_call')
+      return `${lastVisible.agent} → 调用工具：${lastVisible.payload?.tool}`
+    if (lastVisible?.type?.startsWith('sandbox.')) return '🔧 执行代码中...'
+    if (currentPhase) return `阶段：${currentPhase}`
+    return '运行中...'
+  }
+
+  const barCls: Record<string, string> = {
+    running:       'bg-blue-50 border-blue-200 text-blue-800',
+    paused:        'bg-yellow-50 border-yellow-200 text-yellow-800',
+    awaiting_hitl: 'bg-orange-50 border-orange-200 text-orange-800',
+    completed:     'bg-emerald-50 border-emerald-200 text-emerald-800',
+    failed:        'bg-red-50 border-red-200 text-red-800',
+  }
+
+  const fmtTime = (s: number) =>
+    s < 60 ? `${Math.floor(s)}s` : `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`
+
+  return (
+    <div className={clsx('px-4 py-2 border-b flex items-center gap-3 text-xs',
+      barCls[current.state] || 'bg-ink-50 border-ink-200 text-ink-700')}>
+      {isActive && (
+        <span className="relative flex h-2 w-2 flex-shrink-0">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+        </span>
+      )}
+      <span className="flex-1 font-medium truncate">{statusLabel()}</span>
+      {currentPhase && isActive && (
+        <span className="text-[10px] px-1.5 py-0.5 bg-white/60 rounded border border-current/20 shrink-0">
+          {currentPhase}
+        </span>
+      )}
+      <span className="font-mono text-[10px] opacity-60 shrink-0">{fmtTime(elapsed)}</span>
+    </div>
+  )
+}
+
+// ==============================
+// Token 统计栏
+// ==============================
+function TokenBar({ events }: { events: TraceEvent[] }) {
+  const [expanded, setExpanded] = useState(false)
+
+  const { total, byAgent } = useMemo(() => {
+    const usageEvs = events.filter(e => e.type === 'agent.llm_usage')
+    const total = { calls: 0, prompt: 0, completion: 0, total: 0, cost: 0 }
+    const map: Record<string, typeof total & { model: string }> = {}
+
+    for (const ev of usageEvs) {
+      const p = ev.payload
+      total.calls++
+      total.prompt     += p.prompt_tokens     || 0
+      total.completion += p.completion_tokens || 0
+      total.total      += p.total_tokens      || 0
+      total.cost       += p.cost_usd          || 0
+
+      const a = ev.agent || 'unknown'
+      if (!map[a]) map[a] = { calls: 0, prompt: 0, completion: 0, total: 0, cost: 0, model: p.model || '' }
+      map[a].calls++
+      map[a].prompt     += p.prompt_tokens     || 0
+      map[a].completion += p.completion_tokens || 0
+      map[a].total      += p.total_tokens      || 0
+      map[a].cost       += p.cost_usd          || 0
+    }
+
+    return { total, byAgent: Object.entries(map) }
+  }, [events])
+
+  if (total.calls === 0) return null
+
+  return (
+    <div className="px-4 py-1.5 bg-amber-50 border-b border-amber-200 text-[11px]">
+      <div
+        className="flex items-center gap-3 cursor-pointer select-none"
+        onClick={() => setExpanded(v => !v)}>
+        <span className="font-medium text-amber-800">⚡ Tokens</span>
+        <span className="font-mono text-ink-600" title="Prompt tokens">↑{fmtN(total.prompt)}</span>
+        <span className="font-mono text-ink-600" title="Completion tokens">↓{fmtN(total.completion)}</span>
+        <span className="font-mono font-semibold text-ink-800" title="Total tokens">∑{fmtN(total.total)}</span>
+        {total.cost > 0 && (
+          <span className="font-mono text-emerald-700">${total.cost.toFixed(4)}</span>
+        )}
+        <span className="ml-auto text-amber-700">{total.calls} 次调用 {expanded ? '▲' : '▼'}</span>
+      </div>
+
+      {expanded && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {byAgent.map(([agent, s]) => (
+            <div key={agent}
+              className={clsx('flex items-center gap-1.5 px-2 py-1 rounded border text-[10px]',
+                AGENT_BADGE[agent] || 'bg-ink-100 text-ink-600 border-ink-200')}>
+              <span className="font-semibold">{agent}</span>
+              <span className="font-mono opacity-80">↑{fmtN(s.prompt)}</span>
+              <span className="font-mono opacity-80">↓{fmtN(s.completion)}</span>
+              <span className="font-mono font-bold">∑{fmtN(s.total)}</span>
+              {s.cost > 0 && <span className="font-mono">${s.cost.toFixed(4)}</span>}
+              {s.model && <span className="opacity-50 font-mono">{s.model}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ==============================
+// 主组件
+// ==============================
+export function TraceTimeline() {
+  const { events, current } = useStore()
+  const [filter, setFilter] = useState<'all' | 'agent' | 'sandbox' | 'task'>('all')
+  const [autoScroll, setAutoScroll] = useState(true)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // 隐藏纯噪声事件：thinking / llm_usage 由状态栏和 token 栏承担
+  const filtered = useMemo(() => {
+    const hidden = new Set(['agent.thinking', 'agent.llm_usage'])
+    const base = events.filter(e => !hidden.has(e.type))
+    if (filter === 'all') return base
+    return base.filter(e => e.type.startsWith(filter))
+  }, [events, filter])
+
+  // 自动滚底
+  useEffect(() => {
+    if (!autoScroll) return
+    const el = ref.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [filtered.length, autoScroll])
+
+  // 手动滚动时暂停自动滚底
+  const handleScroll = () => {
+    const el = ref.current
+    if (!el) return
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    setAutoScroll(atBottom)
+  }
+
+  const ctrl = (fn: () => Promise<any>) => async () => { try { await fn() } catch {} }
+
+  return (
+    <div className="h-full flex flex-col">
+      <LiveStatus events={events} current={current} />
+      <TokenBar events={events} />
+
+      {/* 工具栏 */}
+      <div className="px-4 py-2 border-b border-ink-200 flex items-center gap-2 bg-white">
+        <div className="flex bg-ink-100 rounded p-0.5 text-xs">
+          {(['all', 'agent', 'sandbox', 'task'] as const).map(k => (
+            <button key={k} onClick={() => setFilter(k)}
+              className={clsx('px-2.5 py-0.5 rounded transition-colors',
+                filter === k ? 'bg-white shadow-sm font-medium' : 'text-ink-500 hover:text-ink-700')}>
+              {k}
+            </button>
+          ))}
+        </div>
+        <span className="text-[11px] text-ink-400">{filtered.length} 条</span>
+        {!autoScroll && (
+          <button
+            onClick={() => { setAutoScroll(true); ref.current?.scrollTo({ top: 1e9, behavior: 'smooth' }) }}
+            className="text-[11px] px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200">
+            ↓ 跳到底部
+          </button>
+        )}
+        <div className="flex-1" />
+        {current && (
+          <div className="flex gap-1.5 text-xs">
+            <button onClick={ctrl(() => api.pause(current.task_id))}
+              className="px-2 py-1 bg-ink-100 hover:bg-ink-200 rounded">暂停</button>
+            <button onClick={ctrl(() => api.resume(current.task_id))}
+              className="px-2 py-1 bg-ink-100 hover:bg-ink-200 rounded">继续</button>
+            <button onClick={ctrl(() => api.cancel(current.task_id))}
+              className="px-2 py-1 bg-red-50 text-red-600 hover:bg-red-100 rounded">取消</button>
+          </div>
+        )}
+      </div>
+
+      {/* 事件流 */}
+      <div ref={ref} onScroll={handleScroll}
+        className="flex-1 overflow-auto scrollbar-thin px-4 py-3 space-y-1.5 bg-ink-50">
+        {filtered.map(ev => {
+          // 找紧跟其后的 llm_usage 事件，用于 token badge
+          const idx = events.indexOf(ev)
+          const usageEv = idx >= 0 && events[idx + 1]?.type === 'agent.llm_usage'
+            ? events[idx + 1] : undefined
+          return <EventCard key={ev.event_id} ev={ev} usageEv={usageEv} />
+        })}
+
+        {/* 思考动画 —— 出现在列表底部 */}
+        {events.at(-1)?.type === 'agent.thinking' && (
+          <div className="flex items-center gap-2 py-2 px-3 text-xs text-ink-400">
+            <span className="flex gap-1 items-end h-3">
+              {[0, 1, 2].map(i => (
+                <span key={i} className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce"
+                  style={{ animationDelay: `${i * 0.15}s` }} />
+              ))}
+            </span>
+            <span>{events.at(-1)?.agent} 正在思考...</span>
+          </div>
+        )}
+
+        {filtered.length === 0 && (
+          <p className="text-xs text-ink-400 py-4 text-center">暂无事件</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ==============================
+// 事件卡片
+// ==============================
+function EventCard({ ev, usageEv }: { ev: TraceEvent; usageEv?: TraceEvent }) {
+  const [collapsed, setCollapsed] = useState(true)
+  const time = new Date(ev.timestamp * 1000).toLocaleTimeString()
+  const agent = ev.agent || (ev.type.startsWith('sandbox') ? 'sandbox' : 'system')
+
+  const isPhase = ev.type.startsWith('phase.')
+  const isTask  = ev.type.startsWith('task.')
+
+  if (isPhase || isTask) {
+    // 轻量行内样式，不显示卡片框
+    return (
+      <div className="flex items-center gap-2 px-2 py-1 text-xs text-ink-400">
+        <span className="w-12 shrink-0 font-mono text-[10px]">{time}</span>
+        <EventBody ev={ev} collapsed={collapsed} onToggle={() => setCollapsed(v => !v)} />
+      </div>
+    )
+  }
+
+  return (
+    <div className={clsx(
+      'border border-ink-200 rounded-lg bg-white border-l-[3px] min-w-0 overflow-hidden',
+      AGENT_BORDER[agent] || 'border-l-ink-300'
+    )}>
+      {/* 头部 */}
+      <div className="flex items-center gap-2 px-3 pt-2 pb-1.5 text-[11px] text-ink-400">
+        <span className={clsx('px-1.5 py-0.5 rounded border text-[10px] font-medium',
+          AGENT_BADGE[agent] || 'bg-ink-100 text-ink-600 border-ink-200')}>
+          {agent}
+        </span>
+        <span className="font-mono text-[10px] opacity-70">{ev.type}</span>
+        {/* Token badge —— 仅在 agent.message 后有 llm_usage 时显示 */}
+        {usageEv && ev.type === 'agent.message' && (
+          <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded text-[10px] font-mono">
+            <span title="Prompt tokens">↑{fmtN(usageEv.payload.prompt_tokens || 0)}</span>
+            <span title="Completion tokens">↓{fmtN(usageEv.payload.completion_tokens || 0)}</span>
+            <span title="Total" className="font-semibold">∑{fmtN(usageEv.payload.total_tokens || 0)}</span>
+          </span>
+        )}
+        <span className="ml-auto font-mono">{time}</span>
+      </div>
+      {/* 内容 */}
+      <div className="px-3 pb-3">
+        <EventBody ev={ev} collapsed={collapsed} onToggle={() => setCollapsed(v => !v)} />
+      </div>
+    </div>
+  )
+}
+
+// ==============================
+// 事件内容
+// ==============================
+function EventBody({ ev, collapsed, onToggle }: {
+  ev: TraceEvent
+  collapsed: boolean
+  onToggle: () => void
+}) {
+  const p = ev.payload
+
+  switch (ev.type) {
+    case 'agent.message':
+      return p.content ? (
+        <div className="markdown-body text-sm leading-relaxed">
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+            {String(p.content)}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        <span className="text-xs text-ink-400">[空消息{p.has_tools ? ' · 调用工具' : ''}]</span>
+      )
+
+    case 'agent.tool_call':
+      return (
+        <div className="text-xs space-y-1">
+          <div className="font-mono font-semibold text-blue-700">→ {p.tool}</div>
+          <pre className="bg-ink-100 rounded p-2 overflow-x-auto text-[11px] max-w-full whitespace-pre-wrap break-all">
+            {JSON.stringify(p.args, null, 2)}
+          </pre>
+        </div>
+      )
+
+    case 'agent.tool_result': {
+      const str = JSON.stringify(p.result, null, 2)
+      const long = str.length > 500
+      return (
+        <div className="text-xs space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-emerald-700">← {p.tool}</span>
+            {long && (
+              <button onClick={onToggle}
+                className="text-[10px] text-blue-600 hover:underline ml-auto">
+                {collapsed ? '展开' : '收起'}
+              </button>
+            )}
+          </div>
+          <pre className={clsx(
+            'bg-ink-50 border border-ink-200 rounded p-2 overflow-x-auto text-[11px] transition-all max-w-full whitespace-pre-wrap break-all',
+            collapsed && long ? 'max-h-24 overflow-hidden' : 'max-h-[400px] overflow-auto'
+          )}>{str}</pre>
+        </div>
+      )
+    }
+
+    case 'sandbox.stdout': {
+      const long = (p.text || '').length > 600
+      return (
+        <div className="text-xs space-y-1">
+          {long && (
+            <div className="flex justify-end">
+              <button onClick={onToggle} className="text-[10px] text-ink-400 hover:text-ink-700">
+                {collapsed ? '展开全部' : '收起'}
+              </button>
+            </div>
+          )}
+          <pre className={clsx(
+            'bg-ink-900 text-emerald-300 rounded p-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed max-w-full',
+            collapsed && long ? 'max-h-40 overflow-hidden' : ''
+          )}>{p.text}</pre>
+        </div>
+      )
+    }
+
+    case 'sandbox.stderr':
+      return (
+        <pre className="text-[11px] bg-red-50 text-red-700 rounded p-2 overflow-x-auto whitespace-pre-wrap max-w-full">
+          {p.text}
+        </pre>
+      )
+
+    case 'sandbox.result':
+      return (
+        <pre className="text-[11px] bg-ink-100 rounded p-2 overflow-x-auto whitespace-pre-wrap max-w-full">
+          {p.text}
+        </pre>
+      )
+
+    case 'sandbox.display':
+      return p.image ? <SandboxImage image={p.image} /> : null
+
+    case 'phase.enter':
+      return (
+        <span className="text-[11px] px-2 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">
+          ▶ {p.phase}
+        </span>
+      )
+    case 'phase.exit':
+      return (
+        <span className="text-[11px] px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-medium">
+          ✓ {p.phase}
+        </span>
+      )
+
+    case 'hitl.request':
+      return <span className="text-xs text-orange-700 font-medium">⏸ {p.prompt}</span>
+    case 'hitl.resolved':
+      return <span className="text-xs text-emerald-700">✓ HITL 已解决</span>
+
+    case 'task.created':   return <span className="text-[11px] text-ink-500">📌 任务已创建</span>
+    case 'task.started':   return <span className="text-[11px] text-blue-700">▶ 任务开始运行</span>
+    case 'task.completed': return <span className="text-[11px] text-emerald-700 font-semibold">✓ 任务已完成</span>
+    case 'task.failed':    return <span className="text-[11px] text-red-700">✗ 失败：{p.error}</span>
+    case 'task.paused':    return <span className="text-[11px] text-yellow-700">⏸ 已暂停</span>
+    case 'task.resumed':   return <span className="text-[11px] text-blue-700">▶ 已恢复运行</span>
+
+    default:
+      return (
+        <pre className="text-[11px] text-ink-400 overflow-x-auto whitespace-pre-wrap break-all max-w-full">
+          {JSON.stringify(p, null, 2)}
+        </pre>
+      )
+  }
+}
+
+// sandbox.display 独立组件，规避 hooks 条件调用
+function SandboxImage({ image }: { image: string }) {
+  const url = useTaskFileUrl(image)
+  return <img src={url} alt="figure" className="max-w-full rounded border border-ink-200 mt-1" />
+}
+
+function useTaskFileUrl(absPath: string): string {
+  const { current } = useStore()
+  if (!current) return ''
+  const wd = current.work_dir.replace(/\\/g, '/')
+  const norm = absPath.replace(/\\/g, '/')
+  const rel = norm.startsWith(wd)
+    ? norm.slice(wd.length).replace(/^\/+/, '')
+    : norm.split('/').pop() || ''
+  return api.fileUrl(current.task_id, rel)
+}

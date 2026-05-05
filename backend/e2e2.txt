@@ -1,0 +1,8 @@
+=== user login ===
+token_len=192
+
+=== /api/models (correct path) ===
+use_default=True agents=default modeler coder writer defaults_count=1 1 1 1 mine_count=1 1 1 1
+
+=== /api/auth/me (check use_default_model field) ===
+me_json={"id":3,"username":"testuser99","email":"test99@t.com","role":"user","is_active":true,"created_at":1777961318.2485955,"last_login":1777961408.295567}
