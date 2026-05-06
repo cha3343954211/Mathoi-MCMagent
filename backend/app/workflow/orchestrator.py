@@ -18,6 +18,7 @@ from ..agents.prompts import (
     WRITER_SECTION_EDA,
     WRITER_SECTION_EVALUATION,
     WRITER_SECTION_RESTATEMENT,
+    WRITER_SECTION_SENSITIVITY,
 )
 from ..core.config import get_settings
 from ..core.events import EventType, emit
@@ -183,12 +184,16 @@ async def run_workflow(task_id: str) -> None:
             # 汇总 Coder 各阶段图表数据特征
             figure_features_text = "\n\n".join(s for s in coder_stdout_log if s.strip())
 
+            # 加载论文写作模板结构参考
+            template_ctx = _load_paper_template()
+
             writer_ctx = (
-                f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
-                f"# 各问题描述\n"
+                (f"# 论文写作模板参考\n{template_ctx}\n\n---\n\n" if template_ctx else "")
+                + f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
+                + f"# 各问题描述\n"
                 + "\n".join(f"**问题{i}**：{questions.get(f'ques{i}','')}" for i in range(1, ques_count + 1))
                 + f"\n\n# 建模方案\n{modeling_plan}\n\n"
-                f"# Coder 分析报告\n{coder_reports}\n\n"
+                + f"# Coder 分析报告\n{coder_reports}\n\n"
                 + (f"# 图表数据特征（Coder print 输出，用于精确描述图表内容）\n{figure_features_text}\n\n"
                    if figure_features_text.strip() else "")
                 + f"# 图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
@@ -208,7 +213,7 @@ async def run_workflow(task_id: str) -> None:
                 ("writer:restatement", WRITER_SECTION_RESTATEMENT, "sec_restatement.md"),
                 ("writer:analysis",    WRITER_SECTION_ANALYSIS,    "sec_analysis.md"),
                 ("writer:assumptions", WRITER_SECTION_ASSUMPTIONS, "sec_assumptions.md"),
-                ("writer:eda",         WRITER_SECTION_EDA,          "sec_eda.md"),
+                ("writer:eda",         WRITER_SECTION_EDA,         "sec_eda.md"),
             ]
             for phase_name, section_prompt, sec_file in writer_sections:
                 await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
@@ -261,15 +266,30 @@ async def run_workflow(task_id: str) -> None:
                 await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
-            # 模型评价节
-            await emit(EventType.PHASE_ENTER, task_id, phase="writer:evaluation")
-            sens_ctx = ""
+            # 敏感性分析节
+            await emit(EventType.PHASE_ENTER, task_id, phase="writer:sensitivity")
             sens_p = work_dir / "sensitivity_report.md"
+            sens_ctx = ""
             if sens_p.exists():
                 sens_ctx = f"\n# 敏感性分析报告\n{sens_p.read_text(encoding='utf-8')[:8000]}\n"
+            sens_figs = [e for e in figure_catalog if e.get("question") == -1]
+            sens_catalog = _format_catalog_for_writer(sens_figs)
             w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
             _patch_agent_with_hitl(w, task_id)
-            output = await w.run(writer_ctx + sens_ctx + WRITER_SECTION_EVALUATION)
+            output = await w.run(
+                writer_ctx + sens_ctx
+                + f"\n# 敏感性分析图表（必须全部插入）\n{sens_catalog}\n\n"
+                + WRITER_SECTION_SENSITIVITY
+            )
+            sections.append(_save_section("sec_sensitivity.md", output))
+            await emit(EventType.PHASE_EXIT, task_id, phase="writer:sensitivity")
+            await task_manager.wait_if_paused(task_id)
+
+            # 模型评价节
+            await emit(EventType.PHASE_ENTER, task_id, phase="writer:evaluation")
+            w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+            _patch_agent_with_hitl(w, task_id)
+            output = await w.run(writer_ctx + WRITER_SECTION_EVALUATION)
             sections.append(_save_section("sec_evaluation.md", output))
             await emit(EventType.PHASE_EXIT, task_id, phase="writer:evaluation")
 
@@ -376,6 +396,17 @@ def _format_catalog_for_writer(catalog: list[dict]) -> str:
             f"- 图{e['index']} {qstr} `{e['file']}` caption=\"{e['caption']}\"{desc}"
         )
     return "\n".join(lines)
+
+
+def _load_paper_template() -> str:
+    """加载 config/paper_template.md，失败则返回空字符串。"""
+    try:
+        tpl = Path(__file__).parent.parent / "config" / "paper_template.md"
+        if tpl.exists():
+            return tpl.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("paper_template.md 加载失败: {}", e)
+    return ""
 
 
 def _extract_figure_features(agent_output: str, label: str = "") -> str:
