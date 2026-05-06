@@ -313,6 +313,10 @@ async def run_workflow(task_id: str) -> None:
             await task_manager.update_state(task_id, TaskState.COMPLETED, phase="done")
             await emit(EventType.TASK_COMPLETED, task_id)
 
+    except asyncio.CancelledError:
+        # 任务被主动取消（cancel() 已写入 CANCELLED 状态并发出事件，这里只需清理）
+        logger.info("workflow cancelled | task={}", task_id)
+        raise  # 让 asyncio 正常完成 Task 的取消流程
     except Exception as e:
         logger.exception("workflow failed")
         await task_manager.update_state(task_id, TaskState.FAILED, error=str(e))

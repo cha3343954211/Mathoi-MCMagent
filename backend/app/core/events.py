@@ -26,6 +26,7 @@ class EventType(str, Enum):
     TASK_RESUMED = "task.resumed"
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
+    TASK_CANCELLED = "task.cancelled"
 
     # 工作流级
     PHASE_ENTER = "phase.enter"

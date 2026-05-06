@@ -186,7 +186,11 @@ export default function App() {
               <div className="flex items-center gap-1.5 shrink-0">
                 {/* 取消（仅运行中/暂停/等待时） */}
                 {['running', 'paused', 'awaiting_hitl', 'pending'].includes(current.state) && (
-                  <button onClick={() => api.cancel(current.task_id).catch(() => {})}
+                  <button onClick={async () => {
+                    try { await api.cancel(current.task_id) } catch {}
+                    // 兜底：无论 WebSocket 是否及时推送，主动刷新状态
+                    setTimeout(() => useStore.getState().refreshCurrent(), 400)
+                  }}
                     className="text-xs px-2.5 py-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-red-200">
                     取消运行
                   </button>

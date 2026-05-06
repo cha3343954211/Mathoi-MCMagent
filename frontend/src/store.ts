@@ -136,6 +136,9 @@ export const useStore = create<State>((set, get) => ({
       const events = exists ? s.events : [...s.events, e]
       return { events }
     })
+    if (e.type === 'task.cancelled' || e.type === 'task.completed' || e.type === 'task.failed') {
+      set({ streamingContent: {} })
+    }
     if (e.type.startsWith('task.') || e.type.startsWith('hitl.') || e.type.startsWith('phase.')) {
       get().refreshCurrent()
     }

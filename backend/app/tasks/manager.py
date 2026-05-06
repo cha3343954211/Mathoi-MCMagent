@@ -182,10 +182,20 @@ class TaskManager:
             await emit(EventType.TASK_RESUMED, task_id)
 
     async def cancel(self, task_id: str) -> None:
+        # 若任务处于暂停状态，先解除 wait() 阻塞，让 CancelledError 能正常传播
+        pause_ev = self._pause_events.get(task_id)
+        if pause_ev:
+            pause_ev.set()
+        # 同理解除 HITL 阻塞
+        hitl_ev = self._hitl_events.get(task_id)
+        if hitl_ev:
+            hitl_ev.set()
+        # 取消 asyncio task（发送 CancelledError）
         handle = self._task_handles.get(task_id)
         if handle and not handle.done():
             handle.cancel()
         await self.update_state(task_id, TaskState.CANCELLED)
+        await emit(EventType.TASK_CANCELLED, task_id)
 
     async def wait_if_paused(self, task_id: str) -> None:
         ev = self._pause_events.get(task_id)

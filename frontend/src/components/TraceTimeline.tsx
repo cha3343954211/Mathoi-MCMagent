@@ -226,6 +226,7 @@ export function TraceTimeline() {
   }
 
   const ctrl = (fn: () => Promise<any>) => async () => { try { await fn() } catch {} }
+  const { refreshCurrent } = useStore()
 
   return (
     <div className="h-full flex flex-col">
@@ -270,7 +271,10 @@ export function TraceTimeline() {
             )}
             {/* 取消：仅活跃状态 */}
             {['running', 'paused', 'awaiting_hitl', 'pending'].includes(current.state) && (
-              <button onClick={ctrl(() => api.cancel(current.task_id))}
+              <button onClick={async () => {
+                try { await api.cancel(current.task_id) } catch {}
+                setTimeout(() => refreshCurrent(), 400)
+              }}
                 className="px-2 py-1 bg-red-50 text-red-600 hover:bg-red-100 rounded border border-red-200">
                 ✕ 取消
               </button>
@@ -516,6 +520,7 @@ function EventBody({ ev, collapsed, onToggle }: {
     case 'task.started':   return <span className="text-[11px] text-blue-700">▶ 任务开始运行</span>
     case 'task.completed': return <span className="text-[11px] text-emerald-700 font-semibold">✓ 任务已完成</span>
     case 'task.failed':    return <FailedEventRow error={p.error} taskId={ev.task_id} />
+    case 'task.cancelled': return <span className="text-[11px] text-ink-500">■ 任务已取消</span>
     case 'task.paused':    return <span className="text-[11px] text-yellow-700">⏸ 已暂停</span>
     case 'task.resumed':   return <span className="text-[11px] text-blue-700">▶ 已恢复运行</span>
 
