@@ -7,8 +7,9 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
     proxy: {
-      '/api': { target: 'http://localhost:8000', changeOrigin: true },
-      '/ws':  { target: 'ws://localhost:8000', ws: true, changeOrigin: true }
+      // HTTP REST + WebSocket 统一走同一规则
+      // ws:true 使 Vite 同时代理 WebSocket Upgrade（/api/ws/tasks/:id）
+      '/api': { target: 'http://localhost:8000', changeOrigin: true, ws: true },
     }
   }
 })

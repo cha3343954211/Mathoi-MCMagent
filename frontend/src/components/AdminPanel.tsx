@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { api, AdminTask, AdminUser, ModelUsage, Overview, Stats, UserUsage } from '../api'
+import { api, AdminTask, AdminUser, ModelUsage, Overview, Stats, TaskFileStat, UserFileStat, UserUsage } from '../api'
 import { AdminModelConfig } from './ModelConfig'
 
-type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage'
+type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files'
 
 export function AdminPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>('overview')
@@ -15,7 +15,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           <div className="flex bg-ink-100 rounded p-0.5 text-xs ml-3">
             {([
               ['overview', '概览'], ['users', '用户'], ['tasks', '任务'],
-              ['models', '默认模型'], ['usage', '用量']
+              ['models', '默认模型'], ['usage', '用量'], ['files', '文件管理']
             ] as [Tab, string][]).map(([k, v]) => (
               <button key={k} onClick={() => setTab(k)}
                 className={`px-3 py-1 rounded ${tab === k ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{v}</button>
@@ -30,6 +30,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           {tab === 'tasks' && <TasksTab />}
           {tab === 'models' && <AdminModelConfig />}
           {tab === 'usage' && <UsageTab />}
+          {tab === 'files' && <FilesTab />}
         </div>
       </div>
     </div>
@@ -139,7 +140,9 @@ function UsersTab() {
           <div className="flex gap-1">
             <select value={form.role} onChange={e => setForm({ ...form, role: e.target.value })}
               className="flex-1 px-2 py-1 border border-ink-200 rounded">
-              <option value="user">user</option><option value="admin">admin</option>
+              <option value="user">user</option>
+              <option value="pro">pro</option>
+              <option value="admin">admin</option>
             </select>
             <button onClick={create} className="px-3 bg-ink-800 text-white rounded hover:bg-ink-700">创建</button>
           </div>
@@ -168,7 +171,9 @@ function UsersTab() {
               <td className="py-2 px-2">
                 <select value={u.role} onChange={e => patch(u, { role: e.target.value })}
                   className="text-xs border border-ink-200 rounded px-1">
-                  <option value="user">user</option><option value="admin">admin</option>
+                  <option value="user">user</option>
+                  <option value="pro">pro</option>
+                  <option value="admin">admin</option>
                 </select>
               </td>
               <td className="py-2 px-2">
@@ -342,6 +347,153 @@ function UsageTab() {
     </div>
   )
 }
+
+// ---------- 文件管理 ----------
+function FilesTab() {
+  const [users, setUsers] = useState<UserFileStat[]>([])
+  const [detailId, setDetailId] = useState<number | null>(null)
+  const [gcResult, setGcResult] = useState<{ removed: string[]; freed_bytes: number } | null>(null)
+  const [gcLoading, setGcLoading] = useState(false)
+
+  const reload = () => api.adminFileUsers().then(setUsers).catch(() => {})
+  useEffect(() => { reload() }, [])
+
+  const runGc = async () => {
+    if (!confirm('扫描并删除所有孤儿工作区目录（无对应任务记录）？')) return
+    setGcLoading(true)
+    try {
+      const r = await api.adminGcFiles()
+      setGcResult({ removed: r.removed, freed_bytes: r.freed_bytes })
+      reload()
+    } catch (e: any) { alert(e?.message || 'GC 失败') }
+    finally { setGcLoading(false) }
+  }
+
+  const fmtSize = (b: number) => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB'
+    : b >= 1024 ? (b / 1024).toFixed(1) + ' KB' : b + ' B'
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="flex items-center gap-3 mb-1">
+        <h3 className="text-sm font-semibold">用户文件统计</h3>
+        <div className="flex-1" />
+        {gcResult && (
+          <span className="text-xs text-green-700 bg-green-50 px-2 py-1 rounded">
+            GC 完成：清理 {gcResult.removed.length} 个目录，释放 {fmtSize(gcResult.freed_bytes)}
+          </span>
+        )}
+        <button onClick={runGc} disabled={gcLoading}
+          className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">
+          {gcLoading ? '清理中…' : '清理孤儿目录 (GC)'}
+        </button>
+        <button onClick={reload} className="text-xs px-3 py-1.5 border border-ink-200 rounded hover:bg-ink-50">刷新</button>
+      </div>
+
+      <table className="w-full text-xs">
+        <thead className="text-ink-500">
+          <tr className="border-b border-ink-200">
+            <th className="text-left py-2 px-2">用户</th>
+            <th className="text-right py-2 px-2">任务数</th>
+            <th className="text-right py-2 px-2">文件数</th>
+            <th className="text-right py-2 px-2">占用空间</th>
+            <th className="text-right py-2 px-2">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map(u => (
+            <tr key={u.user_id} className="border-b border-ink-100 hover:bg-ink-50">
+              <td className="py-2 px-2 font-medium">{u.username}</td>
+              <td className="py-2 px-2 text-right">{u.task_count}</td>
+              <td className="py-2 px-2 text-right">{u.file_count}</td>
+              <td className="py-2 px-2 text-right">{fmtSize(u.total_size)}</td>
+              <td className="py-2 px-2 text-right">
+                <button onClick={() => setDetailId(u.user_id)}
+                  className="text-blue-600 hover:underline">查看</button>
+              </td>
+            </tr>
+          ))}
+          {users.length === 0 && (
+            <tr><td colSpan={5} className="py-4 text-center text-ink-400">暂无数据</td></tr>
+          )}
+        </tbody>
+      </table>
+
+      {detailId !== null && (
+        <UserTaskFilesDialog userId={detailId} onClose={() => { setDetailId(null); reload() }} />
+      )}
+    </div>
+  )
+}
+
+function UserTaskFilesDialog({ userId, onClose }: { userId: number; onClose: () => void }) {
+  const [tasks, setTasks] = useState<TaskFileStat[]>([])
+  const [cleaning, setCleaning] = useState<string | null>(null)
+
+  const reload = () => api.adminFileUserTasks(userId).then(setTasks).catch(() => {})
+  useEffect(() => { reload() }, [userId])
+
+  const fmtSize = (b: number) => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB'
+    : b >= 1024 ? (b / 1024).toFixed(1) + ' KB' : b + ' B'
+
+  const clean = async (taskId: string) => {
+    if (!confirm(`清空任务 ${taskId} 的工作区文件？（任务记录保留）`)) return
+    setCleaning(taskId)
+    try { await api.adminCleanTaskFiles(taskId); reload() }
+    catch (e: any) { alert(e?.message || '清理失败') }
+    finally { setCleaning(null) }
+  }
+
+  const totalSize = tasks.reduce((s, t) => s + t.total_size, 0)
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center">
+      <div className="bg-white rounded-lg shadow-xl w-[760px] max-h-[80vh] flex flex-col">
+        <header className="px-5 py-3 border-b border-ink-200 flex items-center">
+          <h3 className="font-semibold text-sm">任务文件详情</h3>
+          <span className="ml-3 text-xs text-ink-400">共 {tasks.length} 个任务 · {fmtSize(totalSize)}</span>
+          <div className="flex-1" />
+          <button onClick={onClose} className="text-ink-400 hover:text-ink-800">✕</button>
+        </header>
+        <div className="p-4 overflow-auto scrollbar-thin">
+          <table className="w-full text-xs">
+            <thead className="text-ink-500">
+              <tr className="border-b border-ink-200">
+                <th className="text-left py-1 px-2">Task ID</th>
+                <th className="text-left py-1 px-2">标题</th>
+                <th className="text-left py-1 px-2">状态</th>
+                <th className="text-right py-1 px-2">文件数</th>
+                <th className="text-right py-1 px-2">大小</th>
+                <th className="text-right py-1 px-2">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map(t => (
+                <tr key={t.task_id} className="border-b border-ink-100 hover:bg-ink-50">
+                  <td className="py-1.5 px-2 font-mono text-[10px] text-ink-400">{t.task_id}</td>
+                  <td className="py-1.5 px-2 max-w-[200px] truncate" title={t.title}>{t.title}</td>
+                  <td className="py-1.5 px-2 text-ink-500">{t.state}</td>
+                  <td className="py-1.5 px-2 text-right">{t.file_count}</td>
+                  <td className="py-1.5 px-2 text-right">{fmtSize(t.total_size)}</td>
+                  <td className="py-1.5 px-2 text-right">
+                    <button onClick={() => clean(t.task_id)}
+                      disabled={cleaning === t.task_id || t.file_count === 0}
+                      className="text-red-600 hover:underline disabled:text-ink-300">
+                      {cleaning === t.task_id ? '清理中…' : '清空文件'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {tasks.length === 0 && (
+                <tr><td colSpan={6} className="py-4 text-center text-ink-400">暂无任务</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 // ---------- 单用户用量弹窗 ----------
 function UserUsageDialog({ userId, onClose }: { userId: number; onClose: () => void }) {

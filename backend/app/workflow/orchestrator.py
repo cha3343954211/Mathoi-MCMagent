@@ -1,21 +1,35 @@
-"""主工作流：Modeler -> Coder -> Writer。所有 Agent 调用都带 user_id，自动按用户配置 + 计量。"""
+"""
+主工作流：Coordinator → Modeler → Coder(EDA/各问/敏感性) → Writer(分节合并)
+所有 Agent 调用均带 user_id，自动按用户配置解析并计量。
+"""
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
 
-from ..agents import CoderAgent, ModelerAgent, WriterAgent
+from ..agents import CoderAgent, CoordinatorAgent, ModelerAgent, WriterAgent
+from ..agents.prompts import (
+    CODER_EDA_PROMPT,
+    CODER_SENSITIVITY_PROMPT,
+    WRITER_SECTION_ABSTRACT,
+    WRITER_SECTION_ANALYSIS,
+    WRITER_SECTION_ASSUMPTIONS,
+    WRITER_SECTION_EDA,
+    WRITER_SECTION_EVALUATION,
+    WRITER_SECTION_RESTATEMENT,
+)
 from ..core.config import get_settings
 from ..core.events import EventType, emit
 from ..core.logging import logger
 from ..exporters import export_paper
 from ..sandbox import JupyterSandbox
+from ..llm import image_part_from_file
 from ..tasks import TaskState, task_manager
 from ..tools import build_default_registry
 
-# 工作区内被识别为图片的扩展名
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
+_MULTIMODAL_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 def _patch_agent_with_hitl(agent, task_id: str) -> None:
@@ -39,29 +53,53 @@ async def run_workflow(task_id: str) -> None:
     try:
         async with JupyterSandbox(task_id, work_dir) as sandbox:
             tools = build_default_registry(sandbox, work_dir)
+            data_summary = _describe_data(work_dir, task.data_files)
 
-            # ── Phase 1: Modeler ──────────────────────────────────────────
+            # ── Phase 0: Coordinator（问题结构化）────────────────────────
+            await task_manager.update_state(task_id, TaskState.RUNNING, phase="coordinator")
+            await emit(EventType.PHASE_ENTER, task_id, phase="coordinator")
+
+            # 读取随题上传的图片
+            images = [
+                image_part_from_file(work_dir / f)
+                for f in (task.image_files or [])
+                if (work_dir / f).exists()
+                   and Path(f).suffix.lower() in _MULTIMODAL_EXTS
+            ]
+            coordinator = CoordinatorAgent(task_id=task_id, user_id=uid)
+            _patch_agent_with_hitl(coordinator, task_id)
+            questions = await coordinator.run(task.problem, images=images or None)
+            ques_count: int = int(questions.get("ques_count", 1))
+            (work_dir / "questions.json").write_text(
+                json.dumps(questions, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            await task_manager.checkpoint(task_id, "coordinator_done", {"ques_count": ques_count})
+            await emit(EventType.PHASE_EXIT, task_id, phase="coordinator")
+
+            # ── Phase 1: Modeler（建模方案）──────────────────────────────
+            await task_manager.wait_if_paused(task_id)  # 届间检查点
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="modeler")
             await emit(EventType.PHASE_ENTER, task_id, phase="modeler")
 
-            data_summary = _describe_data(work_dir, task.data_files)
             modeler_input = (
-                f"# 赛题\n{task.problem}\n\n"
+                f"# 题目结构化信息\n```json\n{json.dumps(questions, ensure_ascii=False, indent=2)}\n```\n\n"
                 f"# 工作区数据文件\n{data_summary}\n\n"
-                "请输出完整结构化的建模方案（Markdown）。"
+                f"题目共 {ques_count} 个问题，请为每个问题制定详细建模方案，"
+                "并包含 EDA 分析方案和敏感性分析方案。"
             )
-            modeler = ModelerAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=2)
+            modeler = ModelerAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=3)
             _patch_agent_with_hitl(modeler, task_id)
             modeling_plan = await modeler.run(modeler_input)
             (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
-            await task_manager.checkpoint(task_id, "modeler_done", {"plan": modeling_plan})
+            await task_manager.checkpoint(task_id, "modeler_done", {"plan": modeling_plan[:500]})
             await emit(EventType.PHASE_EXIT, task_id, phase="modeler")
+            await task_manager.wait_if_paused(task_id)  # 届间检查点
 
-            # HITL
+            # HITL：审查建模方案
             hitl = await task_manager.request_hitl(
                 task_id,
                 prompt="请审查建模方案，可直接通过 / 修改后通过 / 让 Modeler 重做。",
-                context={"plan_preview": modeling_plan[:1500]},
+                context={"plan_preview": modeling_plan[:2000]},
             )
             action = (hitl or {}).get("action", "approve")
             if action == "edit":
@@ -69,59 +107,178 @@ async def run_workflow(task_id: str) -> None:
                 (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
             elif action == "redo":
                 feedback = hitl.get("feedback", "请重新优化")
-                modeling_plan = await modeler.run(f"用户反馈：{feedback}\n请重新输出建模方案。")
+                modeling_plan = await modeler.run(f"用户反馈：{feedback}\n请重新输出完整建模方案。")
                 (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
 
-            # ── Phase 2: Coder ────────────────────────────────────────────
+            # ── Phase 2: Coder（分流执行）────────────────────────────────
+            await task_manager.wait_if_paused(task_id)  # 届间检查点
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="coder")
             await emit(EventType.PHASE_ENTER, task_id, phase="coder")
-            coder_input = (
+
+            common_ctx = (
                 f"# 建模方案\n{modeling_plan}\n\n"
                 f"# 工作区数据文件\n{data_summary}\n\n"
-                "请按方案逐问实现，每张图用 fig_q{{问题编号}}_{{描述}}.png 命名并 savefig；"
-                "最后用 write_file 保存 analysis_report.md（末尾含 ## 图表目录 JSON 块），再回复 TASK_COMPLETE。"
             )
-            coder = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
-                               max_iterations=settings.max_coder_iterations)
-            _patch_agent_with_hitl(coder, task_id)
-            coder_summary = await coder.run(coder_input)
-            await task_manager.checkpoint(task_id, "coder_done", {"summary": coder_summary})
+
+            # 2a: EDA
+            await emit(EventType.PHASE_ENTER, task_id, phase="coder:eda")
+            coder_eda = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
+                                   max_iterations=settings.max_coder_iterations)
+            _patch_agent_with_hitl(coder_eda, task_id)
+            await coder_eda.run(common_ctx + CODER_EDA_PROMPT)
+            await emit(EventType.PHASE_EXIT, task_id, phase="coder:eda")
+
+            # 2b: 逐问求解
+            await task_manager.wait_if_paused(task_id)  # 届间检查点
+            for qi in range(1, ques_count + 1):
+                ques_key = f"ques{qi}"
+                ques_text = questions.get(ques_key, f"问题{qi}")
+                await emit(EventType.PHASE_ENTER, task_id, phase=f"coder:q{qi}")
+                coder_q = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
+                                     max_iterations=settings.max_coder_iterations)
+                _patch_agent_with_hitl(coder_q, task_id)
+                eda_ctx = ""
+                eda_p = work_dir / "eda_report.md"
+                if eda_p.exists():
+                    eda_ctx = f"\n# EDA 分析报告\n{eda_p.read_text(encoding='utf-8')[:8000]}\n"
+                q_prompt = (
+                    common_ctx + eda_ctx +
+                    f"## 当前任务：求解问题 {qi}\n\n"
+                    f"问题描述：{ques_text}\n\n"
+                    f"参考建模方案中关于「问题{qi}」的方案，完整实现求解、可视化并保存结果。\n"
+                    f"图表命名：`fig_q{qi}_*.png`。\n"
+                    f"最后用 `write_file` 保存 `result_q{qi}.md`（含关键数值结论），再回复 `TASK_COMPLETE`。"
+                )
+                await coder_q.run(q_prompt)
+                await emit(EventType.PHASE_EXIT, task_id, phase=f"coder:q{qi}")
+                await task_manager.wait_if_paused(task_id)  # 逐问间检查点
+
+            # 2c: 敏感性分析
+            await emit(EventType.PHASE_ENTER, task_id, phase="coder:sensitivity")
+            coder_sens = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
+                                    max_iterations=settings.max_coder_iterations)
+            _patch_agent_with_hitl(coder_sens, task_id)
+            await coder_sens.run(common_ctx + CODER_SENSITIVITY_PROMPT)
+            await emit(EventType.PHASE_EXIT, task_id, phase="coder:sensitivity")
+
+            await task_manager.checkpoint(task_id, "coder_done", {})
             await emit(EventType.PHASE_EXIT, task_id, phase="coder")
 
-            # ── Phase 3: Writer ───────────────────────────────────────────
+            # ── Phase 3: Writer（分节写作 → 合并）───────────────────────
+            await task_manager.wait_if_paused(task_id)  # 届间检查点
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="writer")
             await emit(EventType.PHASE_ENTER, task_id, phase="writer")
 
-            analysis_report = ""
-            arp = work_dir / "analysis_report.md"
-            if arp.exists():
-                analysis_report = arp.read_text(encoding="utf-8")
-
-            # 构建结构化图表目录
-            figure_catalog = _build_figure_catalog(work_dir, analysis_report)
+            # 收集 Coder 产出的报告
+            coder_reports = _collect_coder_reports(work_dir, ques_count)
+            figure_catalog = _build_figure_catalog(work_dir)
             catalog_text   = _format_catalog_for_writer(figure_catalog)
 
-            writer_input = (
-                f"# 题目\n{task.problem}\n\n"
-                f"# 建模方案\n{modeling_plan}\n\n"
-                f"# Coder 分析报告\n{analysis_report or coder_summary}\n\n"
-                f"# 图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n"
-                f"{catalog_text}\n\n"
-                "请撰写完整论文并 write_file 保存到 paper.md。"
-                "每问至少插入一张图，图前后须有分析文字，图题格式：**图N：caption**。"
+            writer_ctx = (
+                f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
+                f"# 各问题描述\n"
+                + "\n".join(f"**问题{i}**：{questions.get(f'ques{i}','')}" for i in range(1, ques_count + 1))
+                + f"\n\n# 建模方案\n{modeling_plan}\n\n"
+                f"# Coder 分析报告\n{coder_reports}\n\n"
+                f"# 图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
             )
-            writer = WriterAgent(task_id=task_id, user_id=uid, tools=tools, max_iterations=6)
-            _patch_agent_with_hitl(writer, task_id)
-            await writer.run(writer_input)
-            await emit(EventType.PHASE_EXIT, task_id, phase="writer")
 
-            # 后处理：补充 catalog 中未被引用的图片到论文末尾
+            # 分节写作（Writer 不用工具，直接返回文本，框架负责保存）
+            def _save_section(sec_file: str, content: str) -> str:
+                p = work_dir / sec_file
+                # 若 LLM 已调用 write_file 则以文件为准，否则用返回值兜底
+                if not p.exists() or p.stat().st_size < 50:
+                    p.write_text(content, encoding="utf-8")
+                return p.read_text(encoding="utf-8")
+
+            sections: list[str] = []
+            writer_sections = [
+                ("writer:abstract",    WRITER_SECTION_ABSTRACT,    "sec_abstract.md"),
+                ("writer:restatement", WRITER_SECTION_RESTATEMENT, "sec_restatement.md"),
+                ("writer:analysis",    WRITER_SECTION_ANALYSIS,    "sec_analysis.md"),
+                ("writer:assumptions", WRITER_SECTION_ASSUMPTIONS, "sec_assumptions.md"),
+                ("writer:eda",         WRITER_SECTION_EDA,          "sec_eda.md"),
+            ]
+            for phase_name, section_prompt, sec_file in writer_sections:
+                await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
+                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                _patch_agent_with_hitl(w, task_id)
+                output = await w.run(writer_ctx + section_prompt)
+                sections.append(_save_section(sec_file, output))
+                await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
+                await task_manager.wait_if_paused(task_id)  # 届间检查点
+
+            # 逐问写作
+            for qi in range(1, ques_count + 1):
+                phase_name = f"writer:q{qi}"
+                await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
+                ques_figs = [e for e in figure_catalog if e.get("question") == qi]
+                ques_catalog = _format_catalog_for_writer(ques_figs)
+                ques_result = ""
+                rp = work_dir / f"result_q{qi}.md"
+                if rp.exists():
+                    ques_result = rp.read_text(encoding="utf-8")
+                q_sec_prompt = "\n".join([
+                    f"撰写论文【问题{qi}：建模与求解】章节，保存到 `sec_q{qi}.md`。",
+                    "",
+                    f"### 问题描述",
+                    questions.get(f"ques{qi}", ""),
+                    "",
+                    f"### Coder 求解报告（含全部关键数值）",
+                    ques_result or "（无报告，依据建模方案推断）",
+                    "",
+                    f"### 本问图表目录（必须全部插入正文，一张不得遗漏）",
+                    ques_catalog,
+                    "",
+                    "### 写作要求（必须全部满足）",
+                    f"1. 正文不少于 800 字实质内容（不含图表标注）；",
+                    f"2. 严格按以下结构输出：",
+                    f"   `## 问题{qi}：[自拟标题]`",
+                    f"   `### {qi}.1 问题分析与建模思路`（150-200字：难点分析、方法选择理由、与备选方法对比）",
+                    f"   `### {qi}.2 模型建立`（完整数学公式推导：变量定义→目标函数→约束条件）",
+                    f"   `### {qi}.3 求解过程`（算法步骤、迭代逻辑、关键参数设置）",
+                    f"   `### {qi}.4 结果分析`（逐项引用 Coder 报告数值，插入全部图表）",
+                    f"   `### {qi}.5 本问小结`（50-80字，归纳核心结论）",
+                    f"3. 每个模型公式独立成行 `$$...$$`，变量首次出现时用 `$...$` 定义含义；",
+                    f"4. 每张图前2-3句分析铺垫，图后1-2句结论，图表标注严格用规定格式；",
+                    f"5. 所有数值来自 Coder 报告，精确到4位有效数字，不得编造。",
+                ])
+                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                _patch_agent_with_hitl(w, task_id)
+                output = await w.run(writer_ctx + q_sec_prompt)
+                sections.append(_save_section(f"sec_q{qi}.md", output))
+                await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
+                await task_manager.wait_if_paused(task_id)  # 逐问间检查点
+
+            # 模型评价节
+            await emit(EventType.PHASE_ENTER, task_id, phase="writer:evaluation")
+            sens_ctx = ""
+            sens_p = work_dir / "sensitivity_report.md"
+            if sens_p.exists():
+                sens_ctx = f"\n# 敏感性分析报告\n{sens_p.read_text(encoding='utf-8')[:8000]}\n"
+            w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+            _patch_agent_with_hitl(w, task_id)
+            output = await w.run(writer_ctx + sens_ctx + WRITER_SECTION_EVALUATION)
+            sections.append(_save_section("sec_evaluation.md", output))
+            await emit(EventType.PHASE_EXIT, task_id, phase="writer:evaluation")
+
+            # 合并所有节 → paper.md
             paper_md = work_dir / "paper.md"
-            if paper_md.exists() and figure_catalog:
-                _ensure_all_figures_in_paper(paper_md, figure_catalog)
+            title = questions.get("title", "数学建模论文")
+            full_paper = f"# {title}\n\n" + "\n\n---\n\n".join(s for s in sections if s.strip())
+            paper_md.write_text(full_paper, encoding="utf-8")
+
+            # 后处理：确保所有图片被引用
+            _ensure_all_figures_in_paper(paper_md, figure_catalog)
+
+            # 导出 docx
+            try:
                 docx_path = export_paper(paper_md, work_dir / "paper.docx")
                 logger.info("Paper exported: {}", docx_path)
+            except Exception as e:
+                logger.warning("docx export failed: {}", e)
 
+            await emit(EventType.PHASE_EXIT, task_id, phase="writer")
             await task_manager.update_state(task_id, TaskState.COMPLETED, phase="done")
             await emit(EventType.TASK_COMPLETED, task_id)
 
@@ -146,58 +303,53 @@ def _describe_data(work_dir: Path, files: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _build_figure_catalog(work_dir: Path, analysis_report: str) -> list[dict]:
-    """
-    1. 优先解析 analysis_report 末尾的 ```json 图表目录块；
-    2. 再扫描工作区所有图片文件补充未列出的图；
-    3. 返回 list[{index, file, question, caption, desc}]。
-    """
-    # Step 1：尝试从 analysis_report 解析 JSON 图表目录
-    parsed: list[dict] = []
-    m = re.search(r"```json\s*(\[.*?\])\s*```", analysis_report, re.DOTALL)
-    if m:
-        try:
-            raw = json.loads(m.group(1))
-            for item in raw:
-                if isinstance(item, dict) and "file" in item:
-                    parsed.append({
-                        "file":     item.get("file", ""),
-                        "question": int(item.get("question", 0)),
-                        "caption":  item.get("caption", ""),
-                        "desc":     item.get("desc", ""),
-                    })
-        except (json.JSONDecodeError, ValueError):
-            pass
+def _collect_coder_reports(work_dir: Path, ques_count: int) -> str:
+    """收集 Coder 各阶段产出的报告文件，合并为字符串。"""
+    parts: list[str] = []
+    report_files = (
+        ["eda_report.md"]
+        + [f"result_q{i}.md" for i in range(1, ques_count + 1)]
+        + ["sensitivity_report.md"]
+    )
+    for fname in report_files:
+        p = work_dir / fname
+        if p.exists():
+            content = p.read_text(encoding="utf-8")
+            parts.append(f"### {fname}\n{content}")
+    return "\n\n".join(parts) if parts else "（暂无 Coder 报告）"
 
-    # Step 2：扫描工作区图片（跳过 data_files 等非分析图）
-    existing_files = {
-        p.name for p in work_dir.iterdir()
+
+def _build_figure_catalog(work_dir: Path) -> list[dict]:
+    """
+    扫描工作区所有图片，根据命名规范推断所属问题编号。
+    命名规范：
+      - fig_eda_xxx.png  → question=0（EDA）
+      - fig_q1_xxx.png   → question=1
+      - fig_sens_xxx.png → question=-1（敏感性）
+    返回 list[{index, file, question, caption}]
+    """
+    existing = [
+        p for p in work_dir.iterdir()
         if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
-    }
-    parsed_files = {e["file"] for e in parsed}
-
-    # 已解析中不存在的图（Coder 命名不规范时）
-    for fname in sorted(existing_files - parsed_files):
-        # 猜测问题编号：fig_q1_xxx.png → 1
+    ]
+    catalog: list[dict] = []
+    for p in existing:
+        fname = p.name
         qn = 0
-        qm = re.match(r"fig_q(\d+)", fname)
-        if qm:
-            qn = int(qm.group(1))
-        parsed.append({
-            "file":     fname,
-            "question": qn,
-            "caption":  fname.rsplit(".", 1)[0].replace("_", " "),
-            "desc":     "",
-        })
+        if fname.startswith("fig_eda"):
+            qn = 0
+        elif fname.startswith("fig_sens"):
+            qn = -1
+        else:
+            m = re.match(r"fig_q(\d+)", fname)
+            if m:
+                qn = int(m.group(1))
+        caption = fname.rsplit(".", 1)[0].replace("_", " ")
+        catalog.append({"file": fname, "question": qn, "caption": caption})
 
-    # 过滤掉工作区不存在的文件
-    catalog = [e for e in parsed if e["file"] in existing_files]
-
-    # 按问题编号 + 文件名排序，分配连续编号
-    catalog.sort(key=lambda e: (e["question"], e["file"]))
+    catalog.sort(key=lambda e: (e["question"] if e["question"] >= 0 else 999, e["file"]))
     for i, e in enumerate(catalog, 1):
         e["index"] = i
-
     return catalog
 
 
@@ -208,7 +360,7 @@ def _format_catalog_for_writer(catalog: list[dict]) -> str:
     lines = []
     for e in catalog:
         qstr = f"[问题{e['question']}]" if e["question"] else ""
-        desc = f" — {e['desc']}" if e["desc"] else ""
+        desc = f" — {e['desc']}" if e.get("desc") else ""
         lines.append(
             f"- 图{e['index']} {qstr} `{e['file']}` caption=\"{e['caption']}\"{desc}"
         )

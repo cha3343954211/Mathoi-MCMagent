@@ -11,7 +11,7 @@ import { AdminPanel } from './components/AdminPanel'
 import { api } from './api'
 import clsx from 'clsx'
 
-type Tab = 'trace' | 'files' | 'models'
+type Tab = 'trace' | 'files'
 
 export default function App() {
   const { user, authReady, current, bootstrap, logout, removeTask } = useStore()
@@ -23,6 +23,7 @@ export default function App() {
   const [showChangePwd, setShowChangePwd] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleting, setDeleting]      = useState(false)
+  const [collapsed, setCollapsed]    = useState(false)
 
   useEffect(() => { bootstrap() }, [])
 
@@ -66,66 +67,100 @@ export default function App() {
   return (
     <div className="h-full flex">
       {/* ======== 侧边栏 ======== */}
-      <aside className="w-72 bg-white border-r border-ink-200 flex flex-col">
-        {/* Logo 区 */}
-        <div className="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
-          <div>
-            <h1 className="text-base font-semibold tracking-tight">MathoiAgent</h1>
-            <p className="text-[11px] text-ink-400 mt-0.5">数学建模 AI 工作台</p>
-          </div>
-          <div className="flex items-center gap-1.5">
-            {user.role === 'admin' && (
-              <IconBtn onClick={() => setShowAdmin(true)} title="后台管理">
-                <ShieldIcon />
-              </IconBtn>
-            )}
-            <IconBtn onClick={() => setShowModels(true)} title="模型配置">
-              <GearIcon />
-            </IconBtn>
-          </div>
-        </div>
+      <aside className={clsx(
+        'bg-white border-r border-ink-200 flex flex-col transition-all duration-200 ease-in-out overflow-hidden',
+        collapsed ? 'w-12' : 'w-72'
+      )}>
 
-        {/* 新建任务 */}
-        <div className="px-3 pt-3 pb-1">
-          <button onClick={() => setShowCreate(true)}
-            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-ink-800 text-white rounded-lg text-sm hover:bg-ink-700 transition-colors">
-            <span className="text-base leading-none">+</span>
-            <span>新建任务</span>
-          </button>
-        </div>
-
-        {/* 任务列表 */}
-        <TaskList />
-
-        {/* 用户区 */}
-        <div className="border-t border-ink-200 p-3 relative" ref={menuRef}>
-          <button onClick={() => setShowUserMenu(v => !v)}
-            className="w-full flex items-center gap-2.5 hover:bg-ink-100 rounded-lg p-2 text-left transition-colors">
-            <div className="w-8 h-8 rounded-full bg-ink-800 text-white flex items-center justify-center text-sm font-semibold flex-shrink-0">
+        {collapsed ? (
+          /* ── 收起状态：图标列 ── */
+          <div className="flex flex-col items-center py-2 gap-2 h-full">
+            {/* 展开按钮 */}
+            <button onClick={() => setCollapsed(false)} title="展开侧边栏"
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-ink-500 hover:bg-ink-100 transition-colors mt-1">
+              <SidebarOpenIcon />
+            </button>
+            <div className="w-6 border-t border-ink-200" />
+            {/* 新建 */}
+            <button onClick={() => setShowCreate(true)} title="新建任务"
+              className="w-8 h-8 flex items-center justify-center rounded-lg bg-ink-800 text-white hover:bg-ink-700 transition-colors text-base leading-none">
+              +
+            </button>
+            <div className="flex-1" />
+            {/* 用户头像 */}
+            <button onClick={() => { setCollapsed(false); setShowUserMenu(true) }} title={user.username}
+              className="w-8 h-8 rounded-full bg-ink-800 text-white flex items-center justify-center text-sm font-semibold mb-2">
               {user.username[0].toUpperCase()}
+            </button>
+          </div>
+        ) : (
+          /* ── 展开状态：完整侧边栏 ── */
+          <>
+            {/* Logo 区 */}
+            <div className="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+              <div className="min-w-0">
+                <h1 className="text-base font-semibold tracking-tight">MathoiAgent</h1>
+                <p className="text-[11px] text-ink-400 mt-0.5 whitespace-nowrap">数学建模 AI 工作台</p>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {user.role === 'admin' && (
+                  <IconBtn onClick={() => setShowAdmin(true)} title="后台管理">
+                    <ShieldIcon />
+                  </IconBtn>
+                )}
+                <IconBtn onClick={() => setShowModels(true)} title="模型配置">
+                  <GearIcon />
+                </IconBtn>
+                {/* 收起按钮 */}
+                <IconBtn onClick={() => setCollapsed(true)} title="收起侧边栏">
+                  <SidebarCloseIcon />
+                </IconBtn>
+              </div>
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{user.username}</p>
-              <p className="text-[10px] text-ink-400 truncate">
-                {user.role === 'admin' ? '管理员' : '用户'} · {user.email}
-              </p>
-            </div>
-            <ChevronIcon up={showUserMenu} />
-          </button>
-          {showUserMenu && (
-            <div className="absolute bottom-[60px] left-3 right-3 bg-white border border-ink-200 rounded-lg shadow-lg text-xs overflow-hidden z-10">
-              <button onClick={() => { setShowUserMenu(false); setShowChangePwd(true) }}
-                className="w-full text-left px-3 py-2.5 hover:bg-ink-50 flex items-center gap-2">
-                <KeyIcon /> 修改密码
+
+            {/* 新建任务 */}
+            <div className="px-3 pt-3 pb-1">
+              <button onClick={() => setShowCreate(true)}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-ink-800 text-white rounded-lg text-sm hover:bg-ink-700 transition-colors">
+                <span className="text-base leading-none">+</span>
+                <span>新建任务</span>
               </button>
-              <div className="border-t border-ink-100" />
-              <button onClick={() => { setShowUserMenu(false); logout() }}
-                className="w-full text-left px-3 py-2.5 hover:bg-red-50 text-red-600 flex items-center gap-2">
-                <LogoutIcon /> 注销登录
-              </button>
             </div>
-          )}
-        </div>
+
+            {/* 任务列表 */}
+            <TaskList />
+
+            {/* 用户区 */}
+            <div className="border-t border-ink-200 p-3 relative" ref={menuRef}>
+              <button onClick={() => setShowUserMenu(v => !v)}
+                className="w-full flex items-center gap-2.5 hover:bg-ink-100 rounded-lg p-2 text-left transition-colors">
+                <div className="w-8 h-8 rounded-full bg-ink-800 text-white flex items-center justify-center text-sm font-semibold flex-shrink-0">
+                  {user.username[0].toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{user.username}</p>
+                  <p className="text-[10px] text-ink-400 truncate">
+                    {user.role === 'admin' ? '管理员' : '用户'} · {user.email}
+                  </p>
+                </div>
+                <ChevronIcon up={showUserMenu} />
+              </button>
+              {showUserMenu && (
+                <div className="absolute bottom-[60px] left-3 right-3 bg-white border border-ink-200 rounded-lg shadow-lg text-xs overflow-hidden z-10">
+                  <button onClick={() => { setShowUserMenu(false); setShowChangePwd(true) }}
+                    className="w-full text-left px-3 py-2.5 hover:bg-ink-50 flex items-center gap-2">
+                    <KeyIcon /> 修改密码
+                  </button>
+                  <div className="border-t border-ink-100" />
+                  <button onClick={() => { setShowUserMenu(false); logout() }}
+                    className="w-full text-left px-3 py-2.5 hover:bg-red-50 text-red-600 flex items-center gap-2">
+                    <LogoutIcon /> 注销登录
+                  </button>
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </aside>
 
       {/* ======== 主内容 ======== */}
@@ -179,9 +214,8 @@ export default function App() {
             </header>
 
             <section className="flex-1 overflow-hidden">
-              {tab === 'trace'  && <TraceTimeline />}
-              {tab === 'files'  && <FilesPanel />}
-              {tab === 'models' && <ModelConfig embedded />}
+              {tab === 'trace' && <TraceTimeline />}
+              {tab === 'files' && <FilesPanel />}
             </section>
           </>
         )}
@@ -227,7 +261,7 @@ function Empty({ onNew }: { onNew: () => void }) {
 // Tab 导航
 // ----------------------------------------------------------------
 function Tabs({ tab, setTab }: { tab: string; setTab: (t: any) => void }) {
-  const items: [string, string][] = [['trace', '追踪'], ['files', '产物'], ['models', '模型']]
+  const items: [string, string][] = [['trace', '追踪'], ['files', '产物']]
   return (
     <div className="flex bg-ink-100 rounded-lg p-0.5 text-xs">
       {items.map(([k, v]) => (
@@ -400,6 +434,20 @@ function LogoutIcon() {
     <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
       <path fillRule="evenodd" d="M2 2.75C2 1.784 2.784 1 3.75 1h5.5c.966 0 1.75.784 1.75 1.75v2.5a.75.75 0 0 1-1.5 0v-2.5a.25.25 0 0 0-.25-.25h-5.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h5.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 9.25 15h-5.5A1.75 1.75 0 0 1 2 13.25Zm9.47.47a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.75.75 0 1 1-1.06-1.06L13.69 8 11.47 5.78a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
       <path fillRule="evenodd" d="M5.75 7.25a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" clipRule="evenodd" />
+    </svg>
+  )
+}
+function SidebarCloseIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+      <path fillRule="evenodd" d="M2.75 2a.75.75 0 0 0-.75.75v10.5c0 .414.336.75.75.75H5a.75.75 0 0 0 0-1.5H3.5v-9H5A.75.75 0 0 0 5 2H2.75ZM8.03 5.22a.75.75 0 0 1 0 1.06L7.06 7.25H12a.75.75 0 0 1 0 1.5H7.06l.97.97a.75.75 0 1 1-1.06 1.06l-2.25-2.25a.75.75 0 0 1 0-1.06l2.25-2.25a.75.75 0 0 1 1.06 0Z" clipRule="evenodd" />
+    </svg>
+  )
+}
+function SidebarOpenIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+      <path fillRule="evenodd" d="M2.75 2a.75.75 0 0 0-.75.75v10.5c0 .414.336.75.75.75H5a.75.75 0 0 0 0-1.5H3.5v-9H5A.75.75 0 0 0 5 2H2.75ZM9.47 5.22a.75.75 0 0 0 0 1.06L10.44 7.25H6a.75.75 0 0 0 0 1.5h4.44l-.97.97a.75.75 0 1 0 1.06 1.06l2.25-2.25a.75.75 0 0 0 0-1.06L10.53 5.22a.75.75 0 0 0-1.06 0Z" clipRule="evenodd" />
     </svg>
   )
 }

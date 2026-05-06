@@ -16,6 +16,8 @@ interface State {
   current: Task | null
   events: TraceEvent[]
   ws: WebSocket | null
+  /** 实时输出缓冲：agent 名 → 已累积的流式内容 */
+  streamingContent: Record<string, string>
 
   loadTasks: () => Promise<void>
   selectTask: (id: string) => Promise<void>
@@ -33,10 +35,11 @@ export const useStore = create<State>((set, get) => ({
   current: null,
   events: [],
   ws: null,
+  streamingContent: {},
 
   bootstrap: async () => {
     setUnauthorizedHandler(() => {
-      set({ user: null, tasks: [], current: null, currentId: null, events: [], ws: null })
+      set({ user: null, tasks: [], current: null, currentId: null, events: [], ws: null, streamingContent: {} })
     })
     if (!tokenStore.get()) {
       set({ authReady: true })
@@ -81,6 +84,8 @@ export const useStore = create<State>((set, get) => ({
   selectTask: async (id) => {
     const { ws } = get()
     if (ws) ws.close()
+    // 切换任务时立即清空前一个任务的流式缓冲，避免 UI 残影
+    set({ streamingContent: {} })
     const [task, events] = await Promise.all([api.getTask(id), api.history(id)])
     set({ currentId: id, current: task, events })
     const newWs = api.openWS(id, e => get().appendEvent(e))
@@ -90,7 +95,7 @@ export const useStore = create<State>((set, get) => ({
   closeCurrent: () => {
     const { ws } = get()
     if (ws) ws.close()
-    set({ currentId: null, current: null, events: [], ws: null })
+    set({ currentId: null, current: null, events: [], ws: null, streamingContent: {} })
   },
 
   refreshCurrent: async () => {
@@ -105,6 +110,27 @@ export const useStore = create<State>((set, get) => ({
   },
 
   appendEvent: (e) => {
+    // stream_chunk 不进入 events 列表，直接累积到 streamingContent
+    if (e.type === 'agent.stream_chunk') {
+      const delta = e.payload?.delta ?? ''
+      if (delta) {
+        set(s => ({
+          streamingContent: {
+            ...s.streamingContent,
+            [e.agent]: (s.streamingContent[e.agent] ?? '') + delta,
+          }
+        }))
+      }
+      return
+    }
+    // agent.message 到达时清除该 agent 的流式缓冲
+    if (e.type === 'agent.message') {
+      set(s => {
+        const sc = { ...s.streamingContent }
+        delete sc[e.agent]
+        return { streamingContent: sc }
+      })
+    }
     set(s => {
       const exists = s.events.some(x => x.event_id === e.event_id)
       const events = exists ? s.events : [...s.events, e]

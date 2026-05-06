@@ -18,6 +18,7 @@ class Base(DeclarativeBase):
 
 class UserRole(str, enum.Enum):
     USER = "user"
+    PRO = "pro"
     ADMIN = "admin"
 
 
@@ -45,6 +46,10 @@ class User(Base):
     def is_admin(self) -> bool:
         return self.role == UserRole.ADMIN.value
 
+    @property
+    def is_pro(self) -> bool:
+        return self.role in (UserRole.PRO.value, UserRole.ADMIN.value)
+
 
 class TaskRecord(Base):
     __tablename__ = "tasks"
@@ -66,12 +71,40 @@ class TaskRecord(Base):
     owner: Mapped["User"] = relationship(back_populates="tasks")
 
 
+class ModelPreset(Base):
+    """管理员配置的模型预设（可多条，供用户选择）。
+    - agent = 'all'：适用于所有 Agent
+    - agent = 'modeler'/'coder'/'writer'/'default'：仅特定 Agent 可见
+    """
+    __tablename__ = "model_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)          # 显示名，如 "DeepSeek Chat"
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 可选说明
+    agent: Mapped[str] = mapped_column(String(256), default="all", nullable=False)  # 'all' | 逗号分隔多值如 'modeler,coder'
+    backend: Mapped[str] = mapped_column(String(16), default="openai", nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    api_key_enc: Mapped[str] = mapped_column(Text, default="", nullable=False)  # Fernet 密文
+    temperature: Mapped[float] = mapped_column(Float, default=0.2, nullable=False)
+    max_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    price_prompt_per_1k: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    price_completion_per_1k: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 全局默认预设
+    pro_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)    # 仅管理员/Pro用户可用
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, default=_now, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now, nullable=False)
+
+
 class ModelConfigRow(Base):
     """模型配置。
-    - owner_id IS NULL：全局默认（由管理员维护，所有普通用户可共享使用）
+    - owner_id IS NULL：保留作终极兜底（env 配置），不再通过 UI 直接管理
     - owner_id = user.id：用户自定义
     - agent ∈ {default, modeler, coder, writer}
       default 作为 fallback：当某 agent 没独立配置时用 default。
+    - selected_preset_id：用户选择的预设 ID，非 NULL 时优先使用预设。
     """
     __tablename__ = "model_configs"
     __table_args__ = (
@@ -93,7 +126,24 @@ class ModelConfigRow(Base):
     price_completion_per_1k: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     # 单次调用最大输出 token 数（None 表示不限制，由模型默认）
     max_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # 用户选择的预设 ID（非 NULL 时走预设，忽略自定义字段）
+    selected_preset_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     updated_at: Mapped[float] = mapped_column(Float, default=_now, nullable=False)
+
+
+class EventRecord(Base):
+    """任务事件持久化记录（除流式 chunk 外全量保存）。随任务删除级联清理。"""
+    __tablename__ = "task_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    payload: Mapped[str] = mapped_column(Text, default="{}", nullable=False)   # JSON
+    timestamp: Mapped[float] = mapped_column(Float, nullable=False)
 
 
 class UsageRecord(Base):

@@ -6,7 +6,7 @@ from typing import Optional
 
 from ..core.events import EventType, emit
 from ..core.logging import logger
-from ..llm import ChatMessage, chat_for_user
+from ..llm import ChatMessage, ContentPart, chat_for_user
 from ..tools import ToolRegistry
 
 
@@ -32,9 +32,17 @@ class BaseAgent:
     async def wait_if_paused(self) -> None:
         pass
 
-    async def run(self, user_input: str) -> str:
-        self.history.append(ChatMessage(role="user", content=user_input))
-        await emit(EventType.AGENT_MESSAGE, self.task_id, agent=self.name, role="user", content=user_input)
+    async def run(
+        self,
+        user_input: str,
+        images: Optional[list[ContentPart]] = None,
+    ) -> str:
+        """执行 Agent。images 为可选的图片内容块（image_url 格式）。"""
+        msg = ChatMessage.user(user_input, images)
+        self.history.append(msg)
+        await emit(EventType.AGENT_MESSAGE, self.task_id, agent=self.name,
+                   role="user", content=user_input,
+                   has_images=bool(images), image_count=len(images) if images else 0)
 
         for step in range(self.max_iterations):
             await self.wait_if_paused()

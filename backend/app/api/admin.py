@@ -1,7 +1,9 @@
-"""后台管理路由（仅 admin）：用户、任务、默认模型、用量统计。"""
+"""后台管理路由（仅 admin）：用户、任务、默认模型、用量统计、文件管理。"""
 from __future__ import annotations
 
+import shutil
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,8 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import require_admin
 from ..auth.security import hash_password
-from ..db import ModelConfigRow, TaskRecord, User, UserRole, get_session
-from ..services.model_service import DEFAULT_AGENTS, list_configs, upsert_config
+from ..db import ModelConfigRow, ModelPreset, TaskRecord, User, UserRole, get_session
+from ..services.model_service import (
+    PRESET_AGENTS, create_preset, delete_preset, list_configs, list_presets,
+    select_user_preset, set_default_preset, upsert_config, update_preset,
+)
 from ..services.usage_service import stats_by_model, stats_by_user, stats_for_user, stats_overview
 from ..tasks import task_manager
 
@@ -36,13 +41,13 @@ class AdminUserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_\-]+$")
     email: EmailStr
     password: str = Field(..., min_length=6, max_length=128)
-    role: str = Field(default=UserRole.USER.value, pattern=r"^(user|admin)$")
+    role: str = Field(default=UserRole.USER.value, pattern=r"^(user|pro|admin)$")
 
 
 class AdminUserUpdate(BaseModel):
     email: EmailStr | None = None
     password: str | None = Field(default=None, min_length=6, max_length=128)
-    role: str | None = Field(default=None, pattern=r"^(user|admin)$")
+    role: str | None = Field(default=None, pattern=r"^(user|pro|admin)$")
     is_active: bool | None = None
     use_default_model: bool | None = None
 
@@ -154,7 +159,7 @@ async def admin_delete_task(task_id: str):
 
 # ---------- Default models ----------
 class DefaultModelUpdate(BaseModel):
-    agent: str = Field(..., pattern=r"^(default|modeler|coder|writer)$")
+    agent: str = Field(..., pattern=r"^(default|coordinator|modeler|coder|writer)$")
     backend: Optional[str] = Field(None, pattern=r"^(openai|litellm)$")
     model: Optional[str] = None
     base_url: Optional[str] = None
@@ -183,6 +188,253 @@ async def update_default(body: DefaultModelUpdate, session: AsyncSession = Depen
     )
     await session.commit()
     return {"ok": True}
+
+
+# ---------- Model Presets ----------
+def _preset_out(p) -> dict:
+    return {
+        "id": p.id, "name": p.name, "description": p.description,
+        "agent": p.agent, "backend": p.backend, "model": p.model,
+        "base_url": p.base_url, "has_api_key": bool(p.api_key_enc),
+        "temperature": p.temperature, "max_tokens": p.max_tokens,
+        "price_prompt_per_1k": p.price_prompt_per_1k,
+        "price_completion_per_1k": p.price_completion_per_1k,
+        "is_active": p.is_active, "is_default": p.is_default,
+        "pro_only": p.pro_only,
+        "sort_order": p.sort_order, "created_at": p.created_at,
+    }
+
+
+class PresetCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = ""
+    agent: str = Field(default="all")
+    backend: str = Field(default="openai", pattern=r"^(openai|litellm)$")
+    model: str = Field(..., min_length=1)
+    base_url: str = ""
+    api_key: str = ""
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: Optional[int] = Field(default=None, ge=0)
+    price_prompt_per_1k: float = Field(default=0.0, ge=0)
+    price_completion_per_1k: float = Field(default=0.0, ge=0)
+    sort_order: int = 0
+    is_default: bool = False
+    pro_only: bool = False
+
+
+class PresetUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    description: Optional[str] = None
+    agent: Optional[str] = None
+    backend: Optional[str] = Field(default=None, pattern=r"^(openai|litellm)$")
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None   # "" = 不改；"__clear__" = 清空
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    max_tokens: Optional[int] = Field(default=None, ge=0)
+    price_prompt_per_1k: Optional[float] = Field(default=None, ge=0)
+    price_completion_per_1k: Optional[float] = Field(default=None, ge=0)
+    is_active: Optional[bool] = None
+    pro_only: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+@router.get("/presets")
+async def list_all_presets(
+    agent: Optional[str] = None,
+    session: AsyncSession = Depends(get_session),
+):
+    presets = await list_presets(session, agent=agent, active_only=False)
+    return {"presets": [_preset_out(p) for p in presets], "agents": PRESET_AGENTS}
+
+
+@router.post("/presets")
+async def admin_create_preset(body: PresetCreate, session: AsyncSession = Depends(get_session)):
+    p = await create_preset(
+        session, name=body.name, description=body.description, agent=body.agent,
+        backend=body.backend, model=body.model, base_url=body.base_url,
+        api_key=body.api_key, temperature=body.temperature,
+        max_tokens=body.max_tokens,
+        price_prompt_per_1k=body.price_prompt_per_1k,
+        price_completion_per_1k=body.price_completion_per_1k,
+        sort_order=body.sort_order, is_default=body.is_default,
+        pro_only=body.pro_only,
+    )
+    await session.commit()
+    return _preset_out(p)
+
+
+@router.put("/presets/{preset_id}")
+async def admin_update_preset(
+    preset_id: int, body: PresetUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    kwargs = {k: v for k, v in body.model_dump().items() if v is not None or k in ("api_key",)}
+    try:
+        p = await update_preset(session, preset_id, **kwargs)
+        await session.commit()
+        return _preset_out(p)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+class PresetReorderItem(BaseModel):
+    id: int
+    sort_order: int
+
+
+@router.put("/presets/reorder")
+async def admin_reorder_presets(
+    items: list[PresetReorderItem],
+    session: AsyncSession = Depends(get_session),
+):
+    """批量更新预设排序（拖拽排序后调用）。"""
+    for item in items:
+        p = (await session.execute(select(ModelPreset).where(ModelPreset.id == item.id))).scalar_one_or_none()
+        if p:
+            p.sort_order = item.sort_order
+    await session.commit()
+    return {"ok": True}
+
+
+@router.delete("/presets/{preset_id}")
+async def admin_delete_preset(preset_id: int, session: AsyncSession = Depends(get_session)):
+    await delete_preset(session, preset_id)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/presets/{preset_id}/set-default")
+async def admin_set_default_preset(
+    preset_id: int, session: AsyncSession = Depends(get_session)
+):
+    """将指定预设设为该 agent 的默认预设（替代全局默认配置）。"""
+    try:
+        p = await set_default_preset(session, preset_id)
+        await session.commit()
+        return _preset_out(p)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+# ---------- File Management ----------
+
+class UserFileStat(BaseModel):
+    user_id: int
+    username: str
+    task_count: int
+    file_count: int
+    total_size: int   # bytes
+
+
+class TaskFileStat(BaseModel):
+    task_id: str
+    title: str
+    state: str
+    file_count: int
+    total_size: int
+    work_dir: str
+
+
+def _scan_dir(path: str) -> tuple[int, int]:
+    """返回 (文件数, 总字节数)。目录不存在则 (0, 0)。"""
+    p = Path(path)
+    if not p.exists():
+        return 0, 0
+    count = size = 0
+    for f in p.rglob("*"):
+        if f.is_file():
+            count += 1
+            size += f.stat().st_size
+    return count, size
+
+
+@router.get("/files/users", response_model=list[UserFileStat])
+async def list_user_files(session: AsyncSession = Depends(get_session)):
+    """列出所有用户的工作区文件统计。"""
+    users = (await session.execute(select(User).order_by(User.id))).scalars().all()
+    result = []
+    for u in users:
+        tasks = (await session.execute(
+            select(TaskRecord).where(TaskRecord.user_id == u.id)
+        )).scalars().all()
+        total_files = total_size = 0
+        for t in tasks:
+            fc, sz = _scan_dir(t.work_dir)
+            total_files += fc
+            total_size += sz
+        result.append(UserFileStat(
+            user_id=u.id, username=u.username,
+            task_count=len(tasks),
+            file_count=total_files, total_size=total_size,
+        ))
+    return result
+
+
+@router.get("/files/users/{user_id}", response_model=list[TaskFileStat])
+async def list_user_task_files(
+    user_id: int, session: AsyncSession = Depends(get_session)
+):
+    """列出指定用户下各任务的文件详情。"""
+    u = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not u:
+        raise HTTPException(404, "用户不存在")
+    tasks = (await session.execute(
+        select(TaskRecord).where(TaskRecord.user_id == user_id).order_by(TaskRecord.created_at.desc())
+    )).scalars().all()
+    result = []
+    for t in tasks:
+        fc, sz = _scan_dir(t.work_dir)
+        result.append(TaskFileStat(
+            task_id=t.task_id, title=t.title, state=t.state,
+            file_count=fc, total_size=sz, work_dir=t.work_dir,
+        ))
+    return result
+
+
+@router.delete("/files/tasks/{task_id}")
+async def admin_clean_task_files(
+    task_id: str, session: AsyncSession = Depends(get_session)
+):
+    """清理指定任务的工作区文件（保留任务记录，仅删磁盘文件）。"""
+    t = (await session.execute(
+        select(TaskRecord).where(TaskRecord.task_id == task_id)
+    )).scalar_one_or_none()
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    wd = Path(t.work_dir)
+    if wd.exists():
+        shutil.rmtree(str(wd), ignore_errors=True)
+        wd.mkdir(parents=True, exist_ok=True)  # 保留空目录
+    return {"ok": True, "cleaned": str(wd)}
+
+
+@router.post("/files/gc")
+async def gc_orphan_files(
+    session: AsyncSession = Depends(get_session)
+):
+    """扫描 workspace 目录，清理没有对应任务记录的孤儿目录。"""
+    from ..core.config import get_settings
+    ws_root = get_settings().workspace_path
+    if not ws_root.exists():
+        return {"ok": True, "removed": [], "message": "workspace 目录不存在"}
+
+    # 数据库中所有任务的 work_dir 集合
+    all_tasks = (await session.execute(select(TaskRecord))).scalars().all()
+    valid_dirs = {Path(t.work_dir).resolve() for t in all_tasks if t.work_dir}
+
+    removed = []
+    freed_bytes = 0
+    for item in ws_root.iterdir():
+        if not item.is_dir():
+            continue
+        if item.resolve() not in valid_dirs:
+            _, sz = _scan_dir(str(item))
+            freed_bytes += sz
+            shutil.rmtree(str(item), ignore_errors=True)
+            removed.append(item.name)
+
+    return {"ok": True, "removed": removed, "freed_bytes": freed_bytes}
 
 
 # ---------- Stats ----------

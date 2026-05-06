@@ -1,5 +1,21 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useStore } from '../store'
+
+// ---------- 验证码生成 ----------
+function genCaptcha(): { question: string; answer: number } {
+  const a = Math.floor(Math.random() * 20) + 1
+  const b = Math.floor(Math.random() * 20) + 1
+  const ops = ['+', '-', '×'] as const
+  const op = ops[Math.floor(Math.random() * ops.length)]
+  if (op === '+') return { question: `${a} + ${b}`, answer: a + b }
+  if (op === '-') {
+    const [big, small] = a >= b ? [a, b] : [b, a]
+    return { question: `${big} - ${small}`, answer: big - small }
+  }
+  const x = Math.floor(Math.random() * 9) + 1
+  const y = Math.floor(Math.random() * 9) + 1
+  return { question: `${x} × ${y}`, answer: x * y }
+}
 
 export function AuthPage() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -8,16 +24,29 @@ export function AuthPage() {
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // 验证码状态（仅登录模式）
+  const [captcha, setCaptcha] = useState(genCaptcha)
+  const [captchaInput, setCaptchaInput] = useState('')
+  const refreshCaptcha = useCallback(() => {
+    setCaptcha(genCaptcha())
+    setCaptchaInput('')
+  }, [])
+
   const { login, register } = useStore()
+
+  const captchaOk = mode === 'register' || String(captcha.answer) === captchaInput.trim()
 
   const submit = async (e: any) => {
     e.preventDefault()
+    if (!captchaOk) { setErr('验证码错误'); return }
     setErr(''); setLoading(true)
     try {
       if (mode === 'login') await login(username, password)
       else await register(username, email, password)
     } catch (e: any) {
       setErr(e?.message || '失败')
+      refreshCaptcha()
     } finally {
       setLoading(false)
     }
@@ -37,7 +66,7 @@ export function AuthPage() {
             <button
               key={k}
               type="button"
-              onClick={() => setMode(k)}
+              onClick={() => { setMode(k); setErr(''); refreshCaptcha() }}
               className={`flex-1 py-1.5 rounded ${mode === k ? 'bg-white shadow-sm font-medium' : 'text-ink-500'}`}>
               {k === 'login' ? '登录' : '注册'}
             </button>
@@ -51,19 +80,48 @@ export function AuthPage() {
           )}
           <Field label="密码" type="password" value={password} onChange={setPassword} placeholder="至少 6 位" />
 
+          {mode === 'login' && (
+            <div>
+              <span className="text-xs text-ink-500">验证码</span>
+              <div className="flex items-center gap-2 mt-1">
+                <div className="flex items-center justify-center bg-ink-100 rounded px-4 py-2 font-mono text-sm font-semibold tracking-widest select-none min-w-[100px]">
+                  {captcha.question} = ?
+                </div>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={captchaInput}
+                  onChange={e => setCaptchaInput(e.target.value)}
+                  placeholder="答案"
+                  className={`flex-1 px-3 py-2 border rounded text-sm focus:outline-none ${
+                    captchaInput && !captchaOk
+                      ? 'border-red-300 focus:border-red-400'
+                      : 'border-ink-200 focus:border-ink-500'
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={refreshCaptcha}
+                  title="换一题"
+                  className="px-2 py-2 border border-ink-200 rounded text-ink-400 hover:text-ink-700 hover:bg-ink-50 text-sm">
+                  ↻
+                </button>
+              </div>
+              {captchaInput && !captchaOk && (
+                <p className="text-[11px] text-red-500 mt-1 ml-0.5">答案不正确</p>
+              )}
+            </div>
+          )}
+
           {err && <p className="text-xs text-red-600 bg-red-50 rounded p-2">{err}</p>}
 
           <button
             type="submit"
-            disabled={loading || !username || !password || (mode === 'register' && !email)}
+            disabled={loading || !username || !password || (mode === 'register' && !email) || (mode === 'login' && !captchaOk)}
             className="w-full py-2 bg-ink-800 text-white rounded text-sm hover:bg-ink-700 disabled:opacity-40">
             {loading ? '处理中…' : (mode === 'login' ? '登录' : '注册并登录')}
           </button>
         </form>
-
-        <p className="text-[11px] text-ink-400 text-center mt-5">
-          首次部署默认管理员：<code className="bg-ink-100 px-1 rounded">admin / admin123</code> · 请尽快修改密码
-        </p>
       </div>
     </div>
   )

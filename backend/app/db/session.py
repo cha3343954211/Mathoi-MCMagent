@@ -21,6 +21,9 @@ async def init_db() -> None:
         # 列迁移：为旧库补充新列（SQLite 不支持 IF NOT EXISTS，忽略异常）
         for ddl in [
             "ALTER TABLE model_configs ADD COLUMN max_tokens INTEGER",
+            "ALTER TABLE model_configs ADD COLUMN selected_preset_id INTEGER",
+            "ALTER TABLE model_presets ADD COLUMN is_default BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE model_presets ADD COLUMN pro_only BOOLEAN NOT NULL DEFAULT 0",
         ]:
             try:
                 await conn.exec_driver_sql(ddl)

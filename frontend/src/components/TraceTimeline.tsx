@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api, Task, TraceEvent } from '../api'
 import ReactMarkdown from 'react-markdown'
@@ -25,7 +25,10 @@ const fmtN = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
 // ==============================
 // 实时状态栏
 // ==============================
-function LiveStatus({ events, current }: { events: TraceEvent[]; current: Task | null }) {
+function LiveStatus({ events, current, streamingContent }: {
+  events: TraceEvent[]; current: Task | null
+  streamingContent: Record<string, string>
+}) {
   const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
@@ -45,6 +48,7 @@ function LiveStatus({ events, current }: { events: TraceEvent[]; current: Task |
   )
   const lastThinking = events.at(-1)?.type === 'agent.thinking' ? events.at(-1) : null
   const currentPhase = [...events].reverse().find(e => e.type === 'phase.enter')?.payload?.phase
+  const streamingAgents = Object.keys(streamingContent ?? {})
 
   const isActive = current.state === 'running'
 
@@ -53,7 +57,8 @@ function LiveStatus({ events, current }: { events: TraceEvent[]; current: Task |
     if (current.state === 'failed')    return `✗ 失败：${current.error || ''}`
     if (current.state === 'paused')    return '⏸ 已暂停'
     if (current.state === 'awaiting_hitl') return '⏸ 等待人工介入'
-    if (lastThinking) return `${lastThinking.agent} 正在思考（第 ${lastThinking.payload?.step} 步）`
+    if (streamingAgents.length > 0) return `${streamingAgents.join('/')} 输出中…`
+    if (lastThinking) return `${lastThinking.agent} 思考中（第 ${lastThinking.payload?.step} 步）`
     if (lastVisible?.type === 'agent.tool_call')
       return `${lastVisible.agent} → 调用工具：${lastVisible.payload?.tool}`
     if (lastVisible?.type?.startsWith('sandbox.')) return '🔧 执行代码中...'
@@ -72,6 +77,22 @@ function LiveStatus({ events, current }: { events: TraceEvent[]; current: Task |
   const fmtTime = (s: number) =>
     s < 60 ? `${Math.floor(s)}s` : `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`
 
+  const [retrying, setRetrying] = useState(false)
+  const { refreshCurrent } = useStore()
+
+  const handleRetry = useCallback(async () => {
+    if (!current || retrying) return
+    setRetrying(true)
+    try {
+      await api.retryTask(current.task_id)
+      await refreshCurrent()
+    } catch (e: any) {
+      alert('重试失败：' + (e.message || e))
+    } finally {
+      setRetrying(false)
+    }
+  }, [current, retrying, refreshCurrent])
+
   return (
     <div className={clsx('px-4 py-2 border-b flex items-center gap-3 text-xs',
       barCls[current.state] || 'bg-ink-50 border-ink-200 text-ink-700')}>
@@ -86,6 +107,17 @@ function LiveStatus({ events, current }: { events: TraceEvent[]; current: Task |
         <span className="text-[10px] px-1.5 py-0.5 bg-white/60 rounded border border-current/20 shrink-0">
           {currentPhase}
         </span>
+      )}
+      {current.state === 'failed' && (
+        <button
+          onClick={handleRetry}
+          disabled={retrying}
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium
+                     bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors">
+          {retrying
+            ? <><span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />重试中…</>
+            : <>↺ 重试</>}
+        </button>
       )}
       <span className="font-mono text-[10px] opacity-60 shrink-0">{fmtTime(elapsed)}</span>
     </div>
@@ -164,7 +196,7 @@ function TokenBar({ events }: { events: TraceEvent[] }) {
 // 主组件
 // ==============================
 export function TraceTimeline() {
-  const { events, current } = useStore()
+  const { events, current, streamingContent } = useStore()
   const [filter, setFilter] = useState<'all' | 'agent' | 'sandbox' | 'task'>('all')
   const [autoScroll, setAutoScroll] = useState(true)
   const ref = useRef<HTMLDivElement>(null)
@@ -177,12 +209,13 @@ export function TraceTimeline() {
     return base.filter(e => e.type.startsWith(filter))
   }, [events, filter])
 
-  // 自动滚底
+  // 自动滚底（监听事件列表 + 流式内容双重触发）
+  const streamingKey = Object.values(streamingContent).join('').length
   useEffect(() => {
     if (!autoScroll) return
     const el = ref.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [filtered.length, autoScroll])
+  }, [filtered.length, streamingKey, autoScroll])
 
   // 手动滚动时暂停自动滚底
   const handleScroll = () => {
@@ -196,7 +229,7 @@ export function TraceTimeline() {
 
   return (
     <div className="h-full flex flex-col">
-      <LiveStatus events={events} current={current} />
+      <LiveStatus events={events} current={current} streamingContent={streamingContent} />
       <TokenBar events={events} />
 
       {/* 工具栏 */}
@@ -221,12 +254,27 @@ export function TraceTimeline() {
         <div className="flex-1" />
         {current && (
           <div className="flex gap-1.5 text-xs">
-            <button onClick={ctrl(() => api.pause(current.task_id))}
-              className="px-2 py-1 bg-ink-100 hover:bg-ink-200 rounded">暂停</button>
-            <button onClick={ctrl(() => api.resume(current.task_id))}
-              className="px-2 py-1 bg-ink-100 hover:bg-ink-200 rounded">继续</button>
-            <button onClick={ctrl(() => api.cancel(current.task_id))}
-              className="px-2 py-1 bg-red-50 text-red-600 hover:bg-red-100 rounded">取消</button>
+            {/* 暂停：仅运行中时显示 */}
+            {current.state === 'running' && (
+              <button onClick={ctrl(() => api.pause(current.task_id))}
+                className="px-2 py-1 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded border border-yellow-200">
+                ⏸ 暂停
+              </button>
+            )}
+            {/* 继续：仅暂停中时显示 */}
+            {current.state === 'paused' && (
+              <button onClick={ctrl(() => api.resume(current.task_id))}
+                className="px-2 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded border border-emerald-200">
+                ▶ 继续
+              </button>
+            )}
+            {/* 取消：仅活跃状态 */}
+            {['running', 'paused', 'awaiting_hitl', 'pending'].includes(current.state) && (
+              <button onClick={ctrl(() => api.cancel(current.task_id))}
+                className="px-2 py-1 bg-red-50 text-red-600 hover:bg-red-100 rounded border border-red-200">
+                ✕ 取消
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -242,8 +290,8 @@ export function TraceTimeline() {
           return <EventCard key={ev.event_id} ev={ev} usageEv={usageEv} />
         })}
 
-        {/* 思考动画 —— 出现在列表底部 */}
-        {events.at(-1)?.type === 'agent.thinking' && (
+        {/* 思考动画 —— 无流式输出时才显示 */}
+        {events.at(-1)?.type === 'agent.thinking' && Object.keys(streamingContent).length === 0 && (
           <div className="flex items-center gap-2 py-2 px-3 text-xs text-ink-400">
             <span className="flex gap-1 items-end h-3">
               {[0, 1, 2].map(i => (
@@ -251,9 +299,14 @@ export function TraceTimeline() {
                   style={{ animationDelay: `${i * 0.15}s` }} />
               ))}
             </span>
-            <span>{events.at(-1)?.agent} 正在思考...</span>
+            <span>{events.at(-1)?.agent} 思考中...</span>
           </div>
         )}
+
+        {/* 实时流式输出卡片 */}
+        {Object.entries(streamingContent).map(([agentName, text]) => (
+          <StreamingCard key={agentName} agent={agentName} content={text} />
+        ))}
 
         {filtered.length === 0 && (
           <p className="text-xs text-ink-400 py-4 text-center">暂无事件</p>
@@ -310,6 +363,43 @@ function EventCard({ ev, usageEv }: { ev: TraceEvent; usageEv?: TraceEvent }) {
       <div className="px-3 pb-3">
         <EventBody ev={ev} collapsed={collapsed} onToggle={() => setCollapsed(v => !v)} />
       </div>
+    </div>
+  )
+}
+
+// ==============================
+// 失败事件行（内含重试按钮）
+// ==============================
+function FailedEventRow({ error, taskId }: { error: string; taskId: string }) {
+  const [retrying, setRetrying] = useState(false)
+  const { refreshCurrent } = useStore()
+
+  const handleRetry = useCallback(async () => {
+    if (retrying) return
+    setRetrying(true)
+    try {
+      await api.retryTask(taskId)
+      await refreshCurrent()
+    } catch (e: any) {
+      alert('重试失败：' + (e.message || e))
+    } finally {
+      setRetrying(false)
+    }
+  }, [taskId, retrying, refreshCurrent])
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-[11px] text-red-700">✗ 失败：{error}</span>
+      <button
+        onClick={handleRetry}
+        disabled={retrying}
+        className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium
+                   border border-red-300 text-red-600 bg-red-50 hover:bg-red-100
+                   disabled:opacity-50 transition-colors shrink-0">
+        {retrying
+          ? <><span className="w-2.5 h-2.5 border-2 border-red-300 border-t-red-600 rounded-full animate-spin" />重试中…</>
+          : <>↺ 重试</>}
+      </button>
     </div>
   )
 }
@@ -425,7 +515,7 @@ function EventBody({ ev, collapsed, onToggle }: {
     case 'task.created':   return <span className="text-[11px] text-ink-500">📌 任务已创建</span>
     case 'task.started':   return <span className="text-[11px] text-blue-700">▶ 任务开始运行</span>
     case 'task.completed': return <span className="text-[11px] text-emerald-700 font-semibold">✓ 任务已完成</span>
-    case 'task.failed':    return <span className="text-[11px] text-red-700">✗ 失败：{p.error}</span>
+    case 'task.failed':    return <FailedEventRow error={p.error} taskId={ev.task_id} />
     case 'task.paused':    return <span className="text-[11px] text-yellow-700">⏸ 已暂停</span>
     case 'task.resumed':   return <span className="text-[11px] text-blue-700">▶ 已恢复运行</span>
 
@@ -442,6 +532,44 @@ function EventBody({ ev, collapsed, onToggle }: {
 function SandboxImage({ image }: { image: string }) {
   const url = useTaskFileUrl(image)
   return <img src={url} alt="figure" className="max-w-full rounded border border-ink-200 mt-1" />
+}
+
+// ==============================
+// 流式输出卡片
+// ==============================
+function StreamingCard({ agent, content }: { agent: string; content: string }) {
+  return (
+    <div className={clsx(
+      'border border-ink-200 rounded-lg bg-white border-l-[3px] min-w-0 overflow-hidden',
+      AGENT_BORDER[agent] || 'border-l-blue-400',
+    )}>
+      {/* 头部 */}
+      <div className="flex items-center gap-2 px-3 pt-2 pb-1.5 text-[11px] text-ink-400">
+        <span className={clsx('px-1.5 py-0.5 rounded border text-[10px] font-medium',
+          AGENT_BADGE[agent] || 'bg-ink-100 text-ink-600 border-ink-200')}>
+          {agent}
+        </span>
+        <span className="font-mono text-[10px] opacity-60">streaming…</span>
+        {/* 流式动画指示器 */}
+        <span className="flex gap-0.5 items-end h-3 ml-1">
+          {[0, 1, 2].map(i => (
+            <span key={i} className="w-1 h-1 rounded-full bg-blue-400 animate-bounce"
+              style={{ animationDelay: `${i * 0.12}s` }} />
+          ))}
+        </span>
+      </div>
+      {/* 内容：实时 Markdown 预览 */}
+      <div className="px-3 pb-3">
+        <div className="markdown-body text-sm leading-relaxed">
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+            {content}
+          </ReactMarkdown>
+          {/* 打字机光标 */}
+          <span className="inline-block w-0.5 h-[1em] bg-current align-middle animate-pulse ml-0.5 opacity-70" />
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function useTaskFileUrl(absPath: string): string {

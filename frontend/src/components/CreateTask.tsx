@@ -1,6 +1,21 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
+
+const IMAGE_EXTS = new Set(['png','jpg','jpeg','webp','gif'])
+const isImageFile = (name: string) => IMAGE_EXTS.has(name.split('.').pop()?.toLowerCase() ?? '')
+
+/** 生成 Object URL 预览图，调用方负责 revoke */
+function useObjectUrl(file: File | null): string | null {
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    if (!file) { setUrl(null); return }
+    const u = URL.createObjectURL(file)
+    setUrl(u)
+    return () => URL.revokeObjectURL(u)
+  }, [file])
+  return url
+}
 
 function fileIcon(name: string) {
   const ext = name.split('.').pop()?.toLowerCase() ?? ''
@@ -32,18 +47,42 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
   const FILE_INPUT_ID = 'create-task-file-input'
   const { loadTasks, selectTask } = useStore()
 
+  // 图片预览缓存（file.name → object URL）
+  const [previews, setPreviews] = useState<Record<string, string>>({})
+
+  const updatePreviews = (newFiles: File[]) => {
+    const add: Record<string, string> = {}
+    const keep: Record<string, string> = {}
+    newFiles.forEach(f => {
+      if (isImageFile(f.name)) {
+        keep[f.name] = previews[f.name] || URL.createObjectURL(f)
+        if (!previews[f.name]) add[f.name] = keep[f.name]
+      }
+    })
+    // revoke 已删除文件的 URL
+    Object.entries(previews).forEach(([n, u]) => {
+      if (!keep[n]) URL.revokeObjectURL(u)
+    })
+    setPreviews(keep)
+  }
+
   // 累加文件（去重：同名新文件替换旧文件）
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return
     setFiles(prev => {
       const map = new Map(prev.map(f => [f.name, f]))
       Array.from(incoming).forEach(f => map.set(f.name, f))
-      return Array.from(map.values())
+      const next = Array.from(map.values())
+      updatePreviews(next)
+      return next
     })
   }
 
-  const removeFile = (name: string) =>
+  const removeFile = (name: string) => {
+    if (previews[name]) URL.revokeObjectURL(previews[name])
+    setPreviews(prev => { const p = {...prev}; delete p[name]; return p })
     setFiles(prev => prev.filter(f => f.name !== name))
+  }
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragOver(false)
@@ -112,14 +151,15 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
                 {files.length > 0 && (
                   <span className="ml-1.5 text-ink-400">
                     {files.length} 个 · {fmtSize(totalSize)}
+                    {files.some(f => isImageFile(f.name)) && (
+                      <span className="ml-1.5 px-1.5 py-0.5 bg-violet-100 text-violet-600 text-[10px] rounded">
+                        含图片 · 视觉模型可读
+                      </span>
+                    )}
                   </span>
                 )}
               </label>
-              <label
-                htmlFor={FILE_INPUT_ID}
-                className="text-xs text-blue-600 hover:underline flex items-center gap-1 cursor-pointer select-none">
-                <span className="text-base leading-none">+</span> 添加文件
-              </label>
+              <span className="text-[11px] text-ink-400">拖入添加 · 点击文件删除</span>
             </div>
 
             {/* file input：sr-only 视觉隐藏，label 关联触发 */}
@@ -137,50 +177,62 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
               onDragOver={e => { e.preventDefault(); setDragOver(true) }}
               onDragLeave={() => setDragOver(false)}
               onDrop={onDrop}
-              onClick={() => { if (files.length === 0) document.getElementById(FILE_INPUT_ID)?.click() }}
               className={`
                 border-2 border-dashed rounded-lg transition-colors
                 ${dragOver ? 'border-blue-400 bg-blue-50' : 'border-ink-200 bg-ink-50'}
-                ${files.length === 0 ? 'cursor-pointer hover:border-ink-400' : ''}
               `}
             >
               {files.length === 0 ? (
-                <label htmlFor={FILE_INPUT_ID} className="flex flex-col items-center justify-center py-6 text-ink-400 cursor-pointer w-full">
+                <label
+                  htmlFor={FILE_INPUT_ID}
+                  onClick={e => e.stopPropagation()}
+                  className="flex flex-col items-center justify-center py-6 text-ink-400 cursor-pointer w-full hover:bg-ink-100/50 rounded-lg transition-colors"
+                >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"
                     className="w-8 h-8 mb-2 opacity-50">
                     <path strokeLinecap="round" strokeLinejoin="round"
                       d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
                   </svg>
-                  <p className="text-xs">拖拽文件到此，或点击选择</p>
-                  <p className="text-[11px] mt-0.5 opacity-60">支持 CSV / XLSX / JSON / TXT / PNG 等</p>
+                  <p className="text-xs font-medium">将文件拖拽到此处上传</p>
+                  <p className="text-[11px] mt-0.5 opacity-60">CSV / XLSX / JSON / TXT / PNG / PDF 等</p>
                 </label>
               ) : (
                 <ul className="p-2 space-y-1">
-                  {files.map(f => (
-                    <li key={f.name}
-                      className="flex items-center gap-2 px-2 py-1.5 bg-white rounded border border-ink-200 text-xs group">
-                      <span className="text-base leading-none">{fileIcon(f.name)}</span>
-                      <span className="flex-1 truncate font-medium text-ink-700">{f.name}</span>
-                      <span className="text-ink-400 shrink-0">{fmtSize(f.size)}</span>
-                      <button
-                        type="button"
-                        onClick={e => { e.stopPropagation(); removeFile(f.name) }}
-                        title="移除"
-                        className="opacity-0 group-hover:opacity-100 transition-opacity text-ink-400 hover:text-red-600 shrink-0 ml-1">
-                        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                          <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
-                  {/* 底部：继续添加按钮 */}
-                  <li>
-                    <label
-                      htmlFor={FILE_INPUT_ID}
-                      onClick={e => e.stopPropagation()}
-                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border border-dashed border-ink-300 text-xs text-ink-400 hover:border-ink-500 hover:text-ink-600 transition-colors cursor-pointer">
-                      <span className="text-sm leading-none">+</span> 继续添加文件
-                    </label>
+                  {files.map(f => {
+                    const isImg = isImageFile(f.name)
+                    const prevUrl = previews[f.name]
+                    return (
+                      <li key={f.name}
+                        onClick={() => removeFile(f.name)}
+                        title="点击删除"
+                        className="flex items-center gap-2 px-2 py-1.5 bg-white rounded border border-ink-200 text-xs cursor-pointer hover:bg-red-50 hover:border-red-200 group transition-colors">
+                        {isImg && prevUrl
+                          ? <img src={prevUrl} alt={f.name}
+                              className="w-8 h-8 rounded object-cover shrink-0 border border-ink-100" />
+                          : <span className="text-base leading-none shrink-0">{fileIcon(f.name)}</span>
+                        }
+                        <span className="flex-1 min-w-0">
+                          <span className="block truncate font-medium text-ink-700 group-hover:text-red-600 transition-colors">{f.name}</span>
+                          {isImg && <span className="text-[10px] text-violet-500">视觉模型</span>}
+                        </span>
+                        <span className="text-ink-400 shrink-0 group-hover:hidden">{fmtSize(f.size)}</span>
+                        <span className="hidden group-hover:flex items-center gap-0.5 text-red-500 text-[10px] shrink-0">
+                          <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+                            <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+                          </svg>
+                          删除
+                        </span>
+                      </li>
+                    )
+                  })}
+                  {/* 底部提示 */}
+                  <li className="flex items-center justify-center gap-1.5 px-2 py-2 text-[11px] text-ink-400">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+                      className="w-3.5 h-3.5 opacity-50">
+                      <path strokeLinecap="round" d="M8 3v7M5 7l3 3 3-3" />
+                      <path strokeLinecap="round" d="M3 13h10" />
+                    </svg>
+                    继续拖拽以添加更多文件
                   </li>
                 </ul>
               )}

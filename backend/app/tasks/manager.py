@@ -41,6 +41,7 @@ class Task:
     title: str
     problem: str
     data_files: list[str] = field(default_factory=list)
+    image_files: list[str] = field(default_factory=list)   # 随题提交的图片文件名
     state: TaskState = TaskState.PENDING
     phase: str = ""
     created_at: float = field(default_factory=time.time)

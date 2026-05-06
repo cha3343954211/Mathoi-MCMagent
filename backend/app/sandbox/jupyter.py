@@ -50,6 +50,11 @@ class ExecResult:
         return text
 
 
+_KERNEL_START_TIMEOUT = 90   # wait_for_ready 超时（秒）
+_KERNEL_START_RETRIES = 3    # 最大重试次数
+_KERNEL_RETRY_DELAY  = 3     # 重试间隔（秒）
+
+
 class JupyterSandbox:
     """异步本地 Kernel 沙箱。"""
 
@@ -64,29 +69,63 @@ class JupyterSandbox:
 
     async def start(self) -> None:
         settings = get_settings()
-        self._km = AsyncKernelManager(kernel_name=settings.sandbox_kernel)
-        await self._km.start_kernel(cwd=str(self.work_dir))
-        self._kc = self._km.client()
-        self._kc.start_channels()
-        await self._kc.wait_for_ready(timeout=30)
-        # 预热：禁用 inline backend 的自动展示，统一通过 display_data 取
-        await self._silent_exec(
-            "import os, sys, json\n"
-            "import matplotlib\n"
-            "matplotlib.use('Agg')\n"
-            "import matplotlib.pyplot as plt\n"
-            f"os.chdir(r'{self.work_dir}')\n"
-        )
-        logger.info("Sandbox started | task={} cwd={}", self.task_id, self.work_dir)
+        last_exc: Exception = RuntimeError("unknown")
+        for attempt in range(1, _KERNEL_START_RETRIES + 1):
+            try:
+                # 每次尝试前彻底清理上一次的残留
+                await self._cleanup()
+                self._km = AsyncKernelManager(kernel_name=settings.sandbox_kernel)
+                await self._km.start_kernel(cwd=str(self.work_dir))
+                self._kc = self._km.client()
+                self._kc.start_channels()
+                await self._kc.wait_for_ready(timeout=_KERNEL_START_TIMEOUT)
+                # 预热
+                await self._silent_exec(
+                    "import os, sys, json\n"
+                    "import matplotlib\n"
+                    "matplotlib.use('Agg')\n"
+                    "import matplotlib.pyplot as plt\n"
+                    f"os.chdir(r'{self.work_dir}')\n"
+                )
+                logger.info("Sandbox started (attempt {}) | task={} cwd={}",
+                            attempt, self.task_id, self.work_dir)
+                return  # 成功
+            except Exception as e:
+                last_exc = e
+                logger.warning("Sandbox start attempt {}/{} failed: {}", attempt, _KERNEL_START_RETRIES, e)
+                await self._cleanup()
+                if attempt < _KERNEL_START_RETRIES:
+                    await asyncio.sleep(_KERNEL_RETRY_DELAY)
+        raise RuntimeError(
+            f"Kernel 启动失败（已重试 {_KERNEL_START_RETRIES} 次）：{last_exc}\n"
+            "请检查 ipykernel 是否已安装（pip install ipykernel）"
+        ) from last_exc
+
+    async def _cleanup(self) -> None:
+        """彻底关闭当前 km/kc，忽略所有异常。"""
+        # 先摘引用，再操作，避免重入
+        kc, km = self._kc, self._km
+        self._kc = None
+        self._km = None
+        try:
+            if kc:
+                kc.stop_channels()
+        except Exception:
+            pass
+        try:
+            if km:
+                await km.shutdown_kernel(now=True)
+        except Exception:
+            pass
 
     async def stop(self) -> None:
-        try:
-            if self._kc:
-                self._kc.stop_channels()
-            if self._km:
-                await self._km.shutdown_kernel(now=True)
-        except Exception as e:
-            logger.warning("Sandbox stop error: {}", e)
+        await self._cleanup()
+
+    async def _restart_kernel(self) -> None:
+        """执行中发现内核崩溃时，原地重启。"""
+        logger.warning("Kernel dead, restarting | task={}", self.task_id)
+        await self._cleanup()
+        await self.start()
 
     async def __aenter__(self) -> "JupyterSandbox":
         await self.start()
@@ -112,8 +151,18 @@ class JupyterSandbox:
                 break
 
     async def execute(self, code: str, *, timeout: Optional[int] = None, emit_events: bool = True) -> ExecResult:
-        """执行一段代码，返回结构化结果。"""
+        """执行一段代码，返回结构化结果。执行前检测内核存活，崩溃则自动重启。"""
         async with self._lock:
+            # 检测内核是否还活着，死亡则重启
+            if self._km is not None:
+                try:
+                    alive = await self._km.is_alive()
+                    if not alive:
+                        logger.warning("Kernel not alive before execute, restarting | task={}", self.task_id)
+                        await self._restart_kernel()
+                except Exception as e:
+                    logger.warning("Kernel liveness check failed ({}), restarting | task={}", e, self.task_id)
+                    await self._restart_kernel()
             return await self._execute_impl(code, timeout=timeout, emit_events=emit_events)
 
     async def _execute_impl(self, code: str, *, timeout: Optional[int], emit_events: bool) -> ExecResult:
@@ -123,10 +172,11 @@ class JupyterSandbox:
 
         result = ExecResult(success=True)
         msg_id = self._kc.execute(code)
-        deadline = asyncio.get_event_loop().time() + timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
 
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 result.success = False
                 result.error = f"Execution timeout after {timeout}s"

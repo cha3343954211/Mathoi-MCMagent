@@ -179,6 +179,7 @@ export function FilesPanel() {
                 fileName={selected}
                 fileUrl={api.fileUrl(current.task_id, selected)}
                 pdfUrl={isPaper ? api.exportPdfUrl(current.task_id) : undefined}
+                docxUrl={isPaper ? api.exportDocxUrl(current.task_id) : undefined}
               />
             )}
 
@@ -229,10 +230,10 @@ export function FilesPanel() {
 
 // ── Markdown / 论文查看器 ─────────────────────────────────────────────────────
 function MdViewer({
-  content, loading, taskId, isPaper, fileName, fileUrl, pdfUrl,
+  content, loading, taskId, isPaper, fileName, fileUrl, pdfUrl, docxUrl,
 }: {
   content: string; loading: boolean; taskId: string
-  isPaper: boolean; fileName: string; fileUrl: string; pdfUrl?: string
+  isPaper: boolean; fileName: string; fileUrl: string; pdfUrl?: string; docxUrl?: string
 }) {
   const components = useMemo(() => ({
     img({ src, alt }: { src?: string; alt?: string }) {
@@ -295,6 +296,14 @@ function MdViewer({
         <div className="flex items-center gap-1">
           <span className="text-ink-400 text-[11px] mr-2">{content.length.toLocaleString()} 字符</span>
           <DownloadLink url={fileUrl} name={fileName} label="MD" />
+          {docxUrl && (
+            <DownloadLink
+              url={docxUrl}
+              name="paper.docx"
+              label="DOCX"
+              title="导出 Word 文档（pandoc 优先，降级 python-docx）"
+            />
+          )}
           {pdfUrl && (
             <DownloadLink
               url={pdfUrl}

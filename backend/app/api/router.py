@@ -16,7 +16,10 @@ from ..auth.deps import get_current_user, get_user_from_token
 from ..core.events import bus
 from ..core.logging import logger
 from ..db import AsyncSessionLocal, User, get_session
-from ..services.model_service import DEFAULT_AGENTS, list_configs, resolve_effective, upsert_config
+from ..services.model_service import (
+    DEFAULT_AGENTS, list_configs, list_presets, resolve_effective,
+    select_user_preset, upsert_config,
+)
 from ..services.usage_service import stats_for_task
 from ..tasks import TaskState, task_manager
 from ..workflow import run_workflow
@@ -51,7 +54,7 @@ async def health() -> dict[str, Any]:
 
 # ---------- 模型配置（当前用户视角） ----------
 class UserModelUpdate(BaseModel):
-    agent: str = Field(..., pattern=r"^(default|modeler|coder|writer)$")
+    agent: str = Field(..., pattern=r"^(default|coordinator|modeler|coder|writer)$")
     backend: Optional[str] = Field(None, pattern=r"^(openai|litellm)$")
     model: Optional[str] = None
     base_url: Optional[str] = None
@@ -124,6 +127,49 @@ async def list_provider_models(
         raise HTTPException(502, f"拉取失败: {e}")
 
 
+@router.get("/models/presets")
+async def get_available_presets(
+    agent: str = "all",
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """获取管理员配置的可用预设列表（用户侧，不含明文 key）。
+    pro_only 预设仅对 admin / pro 用户可见。
+    """
+    presets = await list_presets(session, agent=agent if agent != "all" else None, active_only=True)
+    is_privileged = user.role in ("admin", "pro")
+    return {
+        "presets": [
+            {
+                "id": p.id, "name": p.name, "description": p.description,
+                "agent": p.agent, "backend": p.backend, "model": p.model,
+                "base_url": p.base_url, "has_api_key": bool(p.api_key_enc),
+                "temperature": p.temperature, "max_tokens": p.max_tokens,
+                "pro_only": p.pro_only,
+            }
+            for p in presets
+            if not p.pro_only or is_privileged
+        ]
+    }
+
+
+class SelectPreset(BaseModel):
+    agent: str = Field(..., pattern=r"^(default|coordinator|modeler|coder|writer)$")
+    preset_id: Optional[int] = None   # None = 清除选择
+
+
+@router.post("/models/presets/select")
+async def select_preset(
+    body: SelectPreset,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """用户为某个 agent 选择（或清除）预设。"""
+    await select_user_preset(session, user_id=user.id, agent=body.agent, preset_id=body.preset_id)
+    await session.commit()
+    return {"ok": True}
+
+
 @router.post("/models/toggle")
 async def toggle_default(
     body: ToggleDefault,
@@ -153,6 +199,10 @@ async def update_my_model(
 
 
 # ---------- 任务 ----------
+_IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
+_IMAGE_EXTS  = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(
     title: str = Form(...),
@@ -164,17 +214,24 @@ async def create_task(
         raise HTTPException(400, "title 与 problem（至少 10 字）必填")
     t = await task_manager.create(user_id=user.id, title=title, problem=problem, data_files=[])
 
-    saved: list[str] = []
+    data_saved: list[str] = []
+    img_saved:  list[str] = []
     work_dir = Path(t.work_dir)
     for f in files:
         if not f.filename:
             continue
         safe_name = Path(f.filename).name
-        dst = work_dir / safe_name
-        dst.write_bytes(await f.read())
-        saved.append(safe_name)
-    t.data_files = saved
-    await task_manager.update_data_files(t.task_id, saved)
+        (work_dir / safe_name).write_bytes(await f.read())
+        # 按 MIME 或扩展名区分图片 vs 数据
+        is_img = (
+            (f.content_type or "").split(";")[0].strip() in _IMAGE_MIMES
+            or Path(safe_name).suffix.lower() in _IMAGE_EXTS
+        )
+        (img_saved if is_img else data_saved).append(safe_name)
+
+    t.data_files  = data_saved
+    t.image_files = img_saved
+    await task_manager.update_data_files(t.task_id, data_saved)
 
     handle = asyncio.create_task(run_workflow(t.task_id))
     task_manager.attach_handle(t.task_id, handle)
@@ -195,7 +252,7 @@ async def get_task(task_id: str, user: User = Depends(get_current_user)) -> Task
 @router.get("/tasks/{task_id}/events")
 async def get_history(task_id: str, user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
     t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
-    return [e.to_dict() for e in bus.history(task_id)]
+    return [e.to_dict() for e in await bus.history_async(task_id)]
 
 
 @router.post("/tasks/{task_id}/pause")
@@ -219,6 +276,23 @@ async def cancel(task_id: str, user: User = Depends(get_current_user)) -> dict[s
     return {"ok": True}
 
 
+@router.post("/tasks/{task_id}/retry")
+async def retry(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """重试失败/取消的任务：清空错误、重置状态、重新启动工作流。"""
+    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    if t.state not in (TaskState.FAILED, TaskState.CANCELLED):
+        raise HTTPException(400, f"任务当前状态 {t.state.value} 不可重试（仅 failed/cancelled 可重试）")
+    # 取消旧 handle（若残留）
+    await task_manager.cancel(task_id)
+    # 重置状态
+    t.error = ""
+    await task_manager.update_state(task_id, TaskState.PENDING, error="", phase="")
+    # 重启工作流
+    handle = asyncio.create_task(run_workflow(task_id))
+    task_manager.attach_handle(task_id, handle)
+    return {"ok": True}
+
+
 class HITLReply(BaseModel):
     action: str = "approve"
     edited_plan: Optional[str] = None
@@ -233,9 +307,10 @@ async def hitl_reply(task_id: str, body: HITLReply, user: User = Depends(get_cur
 
 
 @router.delete("/tasks/{task_id}")
-async def delete_task(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
+async def delete_task(task_id: str, user: User = Depends(get_current_user)) -> dict:
     t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
     await task_manager.delete(task_id)
+    bus.evict(task_id)   # 清除内存缓存（DB 由 CASCADE FK 自动删除）
     return {"ok": True}
 
 
@@ -286,6 +361,29 @@ async def download_archive(task_id: str, user: User = Depends(get_current_user))
         buf,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{task_id}.zip"'},
+    )
+
+
+@router.get("/tasks/{task_id}/export/docx")
+async def export_docx(task_id: str, user: User = Depends(get_current_user)) -> Any:
+    """将 paper.md 导出为 DOCX（pandoc 优先，降级 python-docx）。"""
+    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    wd = Path(t.work_dir)
+    md_path = wd / "paper.md"
+    if not md_path.exists():
+        raise HTTPException(404, "paper.md 不存在，任务尚未完成")
+    docx_path = wd / "paper_export.docx"
+    try:
+        from ..exporters import export_paper as _export_docx
+        _export_docx(md_path, docx_path)
+    except FileNotFoundError:
+        raise HTTPException(404, "paper.md 不存在")
+    except Exception as e:
+        raise HTTPException(500, f"DOCX 导出失败：{e}")
+    return FileResponse(
+        docx_path, filename="paper.docx",
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": 'attachment; filename="paper.docx"'},
     )
 
 

@@ -83,6 +83,48 @@ export interface AdminModelsView {
   defaults: Record<string, AgentCfg>
 }
 
+export interface ModelPreset {
+  id: number
+  name: string
+  description: string
+  agent: string          // 'all' | 'default' | 'coordinator' | 'modeler' | 'coder' | 'writer'
+  backend: string
+  model: string
+  base_url: string
+  has_api_key: boolean
+  temperature: number
+  max_tokens: number | null
+  price_prompt_per_1k?: number
+  price_completion_per_1k?: number
+  is_active?: boolean
+  is_default?: boolean
+  pro_only?: boolean
+  sort_order?: number
+  created_at?: number
+}
+
+export interface UserFileStat {
+  user_id: number
+  username: string
+  task_count: number
+  file_count: number
+  total_size: number
+}
+
+export interface TaskFileStat {
+  task_id: string
+  title: string
+  state: string
+  file_count: number
+  total_size: number
+  work_dir: string
+}
+
+export interface AdminPresetsView {
+  presets: ModelPreset[]
+  agents: string[]
+}
+
 export interface AdminUser extends User {
   use_default_model: boolean; task_count: number
 }
@@ -160,6 +202,7 @@ export const api = {
   pause: (id: string) => request<any>(`/api/tasks/${id}/pause`, { method: 'POST' }),
   resume: (id: string) => request<any>(`/api/tasks/${id}/resume`, { method: 'POST' }),
   cancel: (id: string) => request<any>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+  retryTask: (id: string) => request<any>(`/api/tasks/${id}/retry`, { method: 'POST' }),
   deleteTask: (id: string) => request<any>(`/api/tasks/${id}`, { method: 'DELETE' }),
   hitl: (id: string, body: any) => request<any>(`/api/tasks/${id}/hitl`, {
     method: 'POST', body: JSON.stringify(body)
@@ -185,6 +228,10 @@ export const api = {
     const t = tokenStore.get()
     return `/api/tasks/${id}/export/pdf${t ? `?token=${encodeURIComponent(t)}` : ''}`
   },
+  exportDocxUrl: (id: string) => {
+    const t = tokenStore.get()
+    return `/api/tasks/${id}/export/docx${t ? `?token=${encodeURIComponent(t)}` : ''}`
+  },
   exportIpynbUrl: (id: string, path: string) => {
     const t = tokenStore.get()
     return `/api/tasks/${id}/files/${encodeURIComponent(path)}/as/ipynb${t ? `?token=${encodeURIComponent(t)}` : ''}`
@@ -200,6 +247,20 @@ export const api = {
     }),
   updateMyModel: (body: Partial<AgentCfg> & { agent: string; api_key?: string }) =>
     request<any>('/api/models/mine', { method: 'POST', body: JSON.stringify(body) }),
+  // 用户获取可选预设
+  getAvailablePresets: (agent = 'all') =>
+    request<{ presets: ModelPreset[] }>(`/api/models/presets?agent=${encodeURIComponent(agent)}`),
+  // 用户选择/清除预设
+  selectPreset: (agent: string, preset_id: number | null) =>
+    request<any>('/api/models/presets/select', {
+      method: 'POST', body: JSON.stringify({ agent, preset_id })
+    }),
+
+  // Admin Files
+  adminFileUsers: () => request<UserFileStat[]>('/api/admin/files/users'),
+  adminFileUserTasks: (userId: number) => request<TaskFileStat[]>(`/api/admin/files/users/${userId}`),
+  adminCleanTaskFiles: (taskId: string) => request<any>(`/api/admin/files/tasks/${taskId}`, { method: 'DELETE' }),
+  adminGcFiles: () => request<{ ok: boolean; removed: string[]; freed_bytes: number }>('/api/admin/files/gc', { method: 'POST' }),
 
   // Admin
   adminUsers: () => request<AdminUser[]>('/api/admin/users'),
@@ -216,6 +277,19 @@ export const api = {
   adminGetDefaults: () => request<AdminModelsView>('/api/admin/models'),
   adminUpdateDefault: (body: any) =>
     request<any>('/api/admin/models', { method: 'POST', body: JSON.stringify(body) }),
+  // Admin preset CRUD
+  adminGetPresets: (agent?: string) =>
+    request<AdminPresetsView>(`/api/admin/presets${agent ? `?agent=${encodeURIComponent(agent)}` : ''}`),
+  adminCreatePreset: (body: Partial<ModelPreset> & { name: string; model: string; api_key?: string }) =>
+    request<ModelPreset>('/api/admin/presets', { method: 'POST', body: JSON.stringify(body) }),
+  adminUpdatePreset: (id: number, body: Partial<ModelPreset> & { api_key?: string }) =>
+    request<ModelPreset>(`/api/admin/presets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  adminDeletePreset: (id: number) =>
+    request<any>(`/api/admin/presets/${id}`, { method: 'DELETE' }),
+  adminReorderPresets: (items: { id: number; sort_order: number }[]) =>
+    request<any>('/api/admin/presets/reorder', { method: 'PUT', body: JSON.stringify(items) }),
+  adminSetDefaultPreset: (id: number) =>
+    request<ModelPreset>(`/api/admin/presets/${id}/set-default`, { method: 'POST' }),
   adminUsageOverview: () => request<Overview>('/api/admin/usage/overview'),
   adminUsageByUser: () => request<UserUsage[]>('/api/admin/usage/by-user'),
   adminUsageByModel: () => request<ModelUsage[]>('/api/admin/usage/by-model'),
