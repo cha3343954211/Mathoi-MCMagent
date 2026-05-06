@@ -120,12 +120,16 @@ async def run_workflow(task_id: str) -> None:
                 f"# 工作区数据文件\n{data_summary}\n\n"
             )
 
+            # stdout 收集：记录各 Coder 阶段的图表数据特征输出
+            coder_stdout_log: list[str] = []
+
             # 2a: EDA
             await emit(EventType.PHASE_ENTER, task_id, phase="coder:eda")
             coder_eda = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                    max_iterations=settings.max_coder_iterations)
             _patch_agent_with_hitl(coder_eda, task_id)
-            await coder_eda.run(common_ctx + CODER_EDA_PROMPT)
+            eda_out = await coder_eda.run(common_ctx + CODER_EDA_PROMPT)
+            coder_stdout_log.append(_extract_figure_features(eda_out, label="EDA"))
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:eda")
 
             # 2b: 逐问求解
@@ -149,7 +153,8 @@ async def run_workflow(task_id: str) -> None:
                     f"图表命名：`fig_q{qi}_*.png`。\n"
                     f"最后用 `write_file` 保存 `result_q{qi}.md`（含关键数值结论），再回复 `TASK_COMPLETE`。"
                 )
-                await coder_q.run(q_prompt)
+                q_out = await coder_q.run(q_prompt)
+                coder_stdout_log.append(_extract_figure_features(q_out, label=f"问题{qi}"))
                 await emit(EventType.PHASE_EXIT, task_id, phase=f"coder:q{qi}")
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
@@ -158,7 +163,8 @@ async def run_workflow(task_id: str) -> None:
             coder_sens = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                     max_iterations=settings.max_coder_iterations)
             _patch_agent_with_hitl(coder_sens, task_id)
-            await coder_sens.run(common_ctx + CODER_SENSITIVITY_PROMPT)
+            sens_out = await coder_sens.run(common_ctx + CODER_SENSITIVITY_PROMPT)
+            coder_stdout_log.append(_extract_figure_features(sens_out, label="敏感性分析"))
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:sensitivity")
 
             await task_manager.checkpoint(task_id, "coder_done", {})
@@ -174,13 +180,18 @@ async def run_workflow(task_id: str) -> None:
             figure_catalog = _build_figure_catalog(work_dir)
             catalog_text   = _format_catalog_for_writer(figure_catalog)
 
+            # 汇总 Coder 各阶段图表数据特征
+            figure_features_text = "\n\n".join(s for s in coder_stdout_log if s.strip())
+
             writer_ctx = (
                 f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
                 f"# 各问题描述\n"
                 + "\n".join(f"**问题{i}**：{questions.get(f'ques{i}','')}" for i in range(1, ques_count + 1))
                 + f"\n\n# 建模方案\n{modeling_plan}\n\n"
                 f"# Coder 分析报告\n{coder_reports}\n\n"
-                f"# 图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
+                + (f"# 图表数据特征（Coder print 输出，用于精确描述图表内容）\n{figure_features_text}\n\n"
+                   if figure_features_text.strip() else "")
+                + f"# 图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
             )
 
             # 分节写作（Writer 不用工具，直接返回文本，框架负责保存）
@@ -365,6 +376,25 @@ def _format_catalog_for_writer(catalog: list[dict]) -> str:
             f"- 图{e['index']} {qstr} `{e['file']}` caption=\"{e['caption']}\"{desc}"
         )
     return "\n".join(lines)
+
+
+def _extract_figure_features(agent_output: str, label: str = "") -> str:
+    """从 Agent 返回文本中提取 【图数据特征】 和 【建模结果汇总】 块，供 Writer 使用。
+    若无特征输出则返回空字符串。
+    """
+    if not agent_output:
+        return ""
+    import re as _re
+    # 匹配 【...】 开头的特征块（多行，直到下一个空行或文末）
+    pattern = _re.compile(
+        r"(【(?:图数据特征|建模结果汇总)[^\n]*】.*?)(?=\n\n|\Z)",
+        _re.DOTALL,
+    )
+    matches = pattern.findall(agent_output)
+    if not matches:
+        return ""
+    prefix = f"## {label}\n" if label else ""
+    return prefix + "\n\n".join(m.strip() for m in matches)
 
 
 def _ensure_all_figures_in_paper(paper_md: Path, catalog: list[dict]) -> None:
