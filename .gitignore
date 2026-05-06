@@ -52,6 +52,9 @@ build/
 Thumbs.db
 Thumbs.db:encryptable
 
+# 参照项目（不纳入版本控制）
+MathModelAgent-main/
+
 # 诊断 / 临时文件
 diag.txt
 build.log
