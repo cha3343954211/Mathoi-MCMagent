@@ -32,22 +32,90 @@ function fmtSize(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-// ---------- 示例题目 ----------
-const EXAMPLES = [
+// ---------- 示例题目（含配套数据文件） ----------
+interface ExampleDef {
+  label: string
+  title: string
+  problem: string
+  dataFile: { name: string; content: string }
+}
+
+const EXAMPLES: ExampleDef[] = [
   {
     label: '农作物种植策略',
     title: '2024 高教杯 C 题 · 农作物种植策略',
     problem: '某地区有多种农作物可供种植，各作物的产量、收益、需水量等参数不同。\n问题 1：建立数学模型，在水资源和土地约束下，给出最优种植策略使总收益最大化。\n问题 2：考虑气候不确定性，建立鲁棒优化模型，分析极端天气对种植方案的影响。\n问题 3：基于历年数据，预测未来三年各作物价格走势，并据此调整种植策略。',
+    dataFile: {
+      name: 'crops_data.csv',
+      content: [
+        '作物,产量_kg每亩,收益_元每亩,需水量_m3每亩,最大种植面积_亩,最小需求_亩,种植周期_天,化肥成本_元每亩',
+        '小麦,450,1800,320,500,100,180,320',
+        '玉米,600,2400,280,400,80,150,280',
+        '大豆,200,2200,240,300,60,120,180',
+        '棉花,120,3600,480,200,40,200,420',
+        '向日葵,180,2700,200,250,30,130,160',
+        '水稻,550,3300,820,300,50,160,380',
+        '花生,300,3000,260,200,40,140,200',
+        '红薯,2200,1760,180,350,70,120,140',
+        '油菜,180,1980,260,280,60,210,220',
+        '高粱,400,2000,220,320,60,140,180',
+      ].join('\n'),
+    },
   },
   {
     label: '交通流量预测',
     title: '2024 数模竞赛 · 城市交通流量优化',
     problem: '给定某城市核心路段一周的车流量时序数据（含早晚高峰、周末差异）。\n问题 1：对交通流量进行时序分析，找出周期性规律并建立预测模型。\n问题 2：识别拥堵瓶颈路段，建立交通分配模型提出优化方案。\n问题 3：评估新增公交线路对路网拥堵的缓解效果，给出量化指标。',
+    dataFile: {
+      name: 'traffic_data.csv',
+      content: [
+        '日期,时段,路段,方向,流量_辆每小时,平均速度_km每h,占有率_pct,事故数',
+        '2024-03-11,07:00,环城北路,东向,1850,23,78,0',
+        '2024-03-11,07:00,环城北路,西向,420,56,18,0',
+        '2024-03-11,08:00,环城北路,东向,2340,15,91,1',
+        '2024-03-11,08:00,环城北路,西向,510,48,22,0',
+        '2024-03-11,09:00,环城北路,东向,1620,34,65,0',
+        '2024-03-11,17:00,环城北路,西向,2180,18,85,0',
+        '2024-03-11,18:00,环城北路,西向,2560,11,94,2',
+        '2024-03-11,07:00,解放大道,南向,1450,31,62,0',
+        '2024-03-11,08:00,解放大道,南向,1980,21,79,0',
+        '2024-03-11,17:00,解放大道,北向,2050,19,82,1',
+        '2024-03-12,07:00,环城北路,东向,1720,26,71,0',
+        '2024-03-12,08:00,环城北路,东向,2290,16,89,0',
+        '2024-03-13,07:00,环城北路,东向,1800,24,75,0',
+        '2024-03-14,07:00,环城北路,东向,1780,25,74,0',
+        '2024-03-15,07:00,环城北路,东向,1760,25,73,0',
+        '2024-03-16,10:00,环城北路,东向,980,48,41,0',
+        '2024-03-17,10:00,环城北路,东向,920,51,38,0',
+      ].join('\n'),
+    },
   },
   {
     label: '人口预测建模',
     title: '人口结构变化与政策影响分析',
     problem: '提供某省过去 30 年人口出生率、死亡率、迁移率等统计数据。\n问题 1：构建人口预测模型（如 Leslie 矩阵或 ARIMA），预测未来 20 年人口规模。\n问题 2：分析老龄化趋势对劳动力和社保资金的影响，建立可持续性评估模型。\n问题 3：对比不同生育政策情景，量化政策效果并给出政策建议。',
+    dataFile: {
+      name: 'population_data.csv',
+      content: [
+        '年份,出生率_千分,死亡率_千分,净迁移率_千分,年末人口_万人,0至14岁_pct,15至64岁_pct,65岁以上_pct,城镇化率_pct',
+        '1993,18.09,6.64,0.20,11851,27.8,66.4,5.8,28.1',
+        '1995,17.12,6.57,0.22,12112,26.6,67.2,6.2,29.0',
+        '1997,16.57,6.51,0.25,12363,25.7,67.9,6.4,30.4',
+        '1999,14.64,6.46,0.28,12578,24.5,68.7,6.8,34.8',
+        '2001,13.38,6.43,0.31,12763,22.5,70.2,7.3,37.7',
+        '2003,12.41,6.40,0.35,12923,21.0,70.9,8.1,40.5',
+        '2005,12.40,6.51,0.40,13076,19.8,72.0,8.2,42.9',
+        '2007,12.10,6.93,0.45,13213,19.1,72.5,8.4,45.9',
+        '2009,11.95,7.08,0.50,13332,18.5,73.4,8.1,48.3',
+        '2011,11.93,7.14,0.52,13474,16.5,74.4,9.1,51.3',
+        '2013,12.08,7.16,0.55,13608,16.4,73.9,9.7,53.7',
+        '2015,11.99,7.11,0.58,13761,16.6,73.0,10.4,56.1',
+        '2017,12.43,7.11,0.60,13902,17.0,72.0,11.0,58.5',
+        '2019,10.48,7.14,0.58,14005,17.0,70.6,12.4,60.6',
+        '2021,7.52,7.18,0.55,14126,17.5,68.3,14.2,64.7',
+        '2022,6.77,7.37,0.52,14175,16.8,68.1,15.1,65.2',
+      ].join('\n'),
+    },
   },
 ]
 
@@ -66,11 +134,10 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
   // 图片预览缓存
   const [previews, setPreviews] = useState<Record<string, string>>({})
 
-  // 累加文件（去重：同名新文件替换旧文件）
+  // 累加文件（接受 FileList 或 File[]）
   // ⚠️ 不在 setFiles 回调内调用 setPreviews，避免 React setState 嵌套副作用
-  const addFiles = (incoming: FileList | null) => {
-    if (!incoming) return
-    const incomingArr = Array.from(incoming)
+  const addFileArr = (incomingArr: File[]) => {
+    if (!incomingArr.length) return
     setFiles(prev => {
       const map = new Map(prev.map(f => [f.name, f]))
       incomingArr.forEach(f => map.set(f.name, f))
@@ -85,6 +152,11 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
       })
       return next
     })
+  }
+
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming) return
+    addFileArr(Array.from(incoming))
   }
 
   const removeFile = (name: string) => {
@@ -117,11 +189,15 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
   const totalSize = files.reduce((s, f) => s + f.size, 0)
   const hasImage  = files.some(f => isImageFile(f.name))
 
-  // 应用示例
-  const applyExample = (ex: typeof EXAMPLES[0]) => {
+  // 应用示例（自动注入配套数据文件）
+  const applyExample = (ex: ExampleDef) => {
     setTitle(ex.title)
     setProblem(ex.problem)
     setShowExamples(false)
+    // 生成浏览器端 File 对象（CSV UTF-8）
+    const blob = new Blob(['﻿' + ex.dataFile.content], { type: 'text/csv;charset=utf-8' })
+    const file = new File([blob], ex.dataFile.name, { type: 'text/csv' })
+    addFileArr([file])
   }
 
   return (
@@ -155,9 +231,10 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
                   key={ex.label}
                   type="button"
                   onClick={() => applyExample(ex)}
-                  className="text-xs px-3 py-1.5 rounded-full border border-ink-300 bg-white
+                  className="text-left text-xs px-3 py-2 rounded-xl border border-ink-300 bg-white
                              hover:bg-ink-800 hover:text-white hover:border-ink-800 transition-colors">
-                  {ex.label}
+                  <div className="font-medium">{ex.label}</div>
+                  <div className="text-[10px] opacity-60 mt-0.5">📊 {ex.dataFile.name}</div>
                 </button>
               ))}
             </div>
