@@ -18,6 +18,8 @@ secrets.json
 
 # 数据库（含加密 API key，不提交）
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
