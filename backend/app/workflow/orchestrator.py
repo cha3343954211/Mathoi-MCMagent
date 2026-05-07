@@ -99,49 +99,44 @@ async def run_workflow(task_id: str) -> None:
 
             modeling_plan = ""
             solutions: dict = {}
-            _MAX_REDO = 2   # 最多允许重做 2 次
+            _MAX_REDO = 2         # 最多允许重做 2 次
+            _redo_feedback = ""   # 用户反馈（传给下一轮 Modeler）
+            plan_path = work_dir / "modeling_plan.md"
+
             for _redo_round in range(_MAX_REDO + 1):
                 modeler = ModelerAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=3)
                 _patch_agent_with_hitl(modeler, task_id)
-                feedback_text = modeling_plan if _redo_round > 0 else ""
-                modeling_plan = await modeler.run(_build_modeler_input(feedback_text))
-                plan_path = work_dir / "modeling_plan.md"
+                modeling_plan = await modeler.run(_build_modeler_input(_redo_feedback))
                 plan_path.write_text(modeling_plan, encoding="utf-8")
                 solutions = parse_modeler_sections(modeling_plan)
 
                 # HITL：暂停让用户审核方案
-                hitl_ctx = {
-                    "plan": modeling_plan,
-                    "plan_preview": modeling_plan[:4000],
-                    "sections": list(solutions.keys()),
-                    "ques_count": ques_count,
-                    "redo_round": _redo_round,
-                    "max_redo": _MAX_REDO,
-                }
                 hitl_resp = await task_manager.request_hitl(
                     task_id,
                     f"建模方案已生成（第{_redo_round + 1}稿）。请审核后选择操作：",
-                    hitl_ctx,
+                    {
+                        "plan": modeling_plan,
+                        "plan_preview": modeling_plan[:4000],
+                        "sections": list(solutions.keys()),
+                        "ques_count": ques_count,
+                        "redo_round": _redo_round,
+                        "max_redo": _MAX_REDO,
+                    },
                 )
                 action = hitl_resp.get("action", "approve")
 
                 if action == "approve":
-                    # 直接通过
                     break
                 elif action == "edit" and hitl_resp.get("edited_plan", "").strip():
-                    # 用户手动编辑后通过
                     modeling_plan = hitl_resp["edited_plan"].strip()
                     plan_path.write_text(modeling_plan, encoding="utf-8")
                     solutions = parse_modeler_sections(modeling_plan)
                     break
                 elif action == "redo" and _redo_round < _MAX_REDO:
-                    # 重做：把用户反馈拼入下一轮 input
-                    feedback_text = hitl_resp.get("feedback", "")
-                    modeling_plan = feedback_text   # 传给下轮的占位
-                    logger.info("Modeler redo round {} with feedback: {}", _redo_round + 1, feedback_text[:80])
+                    _redo_feedback = hitl_resp.get("feedback", "")
+                    logger.info("Modeler redo #{} feedback: {}", _redo_round + 1, _redo_feedback[:80])
                     continue
                 else:
-                    # redo 超限或未知 action，直接通过
                     break
 
             def _solution_ctx(key: str) -> str:

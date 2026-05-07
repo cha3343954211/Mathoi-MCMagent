@@ -27,7 +27,15 @@ export function HITLPanel() {
   const maxRedo: number = req?.context?.max_redo ?? 2
   const canRedo = redoRound < maxRedo
 
-  // 切换到编辑模式时预填整体方案
+  // 新的 HITL 请求到来时（通过 ts 识别）重置所有状态
+  useEffect(() => {
+    if (!req) return
+    setMode('preview')
+    setEdited('')
+    setFeedback('')
+  }, [req?.ts])
+
+  // 切换到编辑模式时预填整体方案（仅首次）
   useEffect(() => {
     if (mode === 'edit' && !edited) setEdited(plan)
   }, [mode])

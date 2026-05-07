@@ -525,8 +525,15 @@ function EventBody({ ev, collapsed, onToggle }: {
 
     case 'hitl.request':
       return <span className="text-xs text-orange-700 font-medium">⏸ {p.prompt}</span>
-    case 'hitl.resolved':
-      return <span className="text-xs text-emerald-700">✓ HITL 已解决</span>
+    case 'hitl.resolved': {
+      const actionMap: Record<string, string> = {
+        approve: '✓ 方案已确认，继续执行',
+        edit:    '✏️ 方案已手动修改并通过',
+        redo:    '🔄 已请求重新生成方案',
+      }
+      const act = p.response?.action || 'approve'
+      return <span className="text-xs text-emerald-700">{actionMap[act] ?? `✓ 已处理（${act}）`}</span>
+    }
 
     case 'task.created':   return <span className="text-[11px] text-ink-500">📌 任务已创建</span>
     case 'task.started':   return <span className="text-[11px] text-blue-700">▶ 任务开始运行</span>
