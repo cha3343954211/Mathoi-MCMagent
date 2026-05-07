@@ -43,9 +43,14 @@ export function AuthPage() {
     setErr(''); setLoading(true)
     try {
       if (mode === 'login') await login(username, password)
-      else await register(username, email, password)
+      else await register(username, password, email.trim() || undefined)
     } catch (e: any) {
-      setErr(e?.message || '失败')
+      // 友好化错误提示
+      const msg: string = e?.message || '失败'
+      if (msg.includes('用户名已')) setErr('用户名已被占用，请换一个')
+      else if (msg.includes('邮箱已')) setErr('该邮笱已注册，请直接登录')
+      else if (msg.includes('密码') || msg.includes('password')) setErr('密码错误')
+      else setErr(msg)
       refreshCaptcha()
     } finally {
       setLoading(false)
@@ -76,7 +81,13 @@ export function AuthPage() {
         <form onSubmit={submit} className="space-y-3">
           <Field label="用户名" value={username} onChange={setUsername} placeholder="3-32 位字母/数字/下划线" />
           {mode === 'register' && (
-            <Field label="邮箱" type="email" value={email} onChange={setEmail} placeholder="you@example.com" />
+            <Field
+              label="邮箱（可选）"
+              type="email"
+              value={email}
+              onChange={setEmail}
+              placeholder="可不填，用于找回密码"
+            />
           )}
           <Field label="密码" type="password" value={password} onChange={setPassword} placeholder="至少 6 位" />
 
@@ -117,7 +128,7 @@ export function AuthPage() {
 
           <button
             type="submit"
-            disabled={loading || !username || !password || (mode === 'register' && !email) || (mode === 'login' && !captchaOk)}
+            disabled={loading || !username || !password || (mode === 'login' && !captchaOk)}
             className="w-full py-2 bg-ink-800 text-white rounded text-sm hover:bg-ink-700 disabled:opacity-40">
             {loading ? '处理中…' : (mode === 'login' ? '登录' : '注册并登录')}
           </button>

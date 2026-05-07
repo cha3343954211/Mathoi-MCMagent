@@ -68,6 +68,7 @@ class TaskManager:
         self._pause_events: dict[str, asyncio.Event] = {}
         self._hitl_events: dict[str, asyncio.Event] = {}
         self._task_handles: dict[str, asyncio.Task] = {}
+        self._sandboxes: dict[str, Any] = {}  # task_id -> JupyterSandbox
 
     async def init(self) -> None:
         """从数据库恢复未结束的任务元信息（运行状态置为 cancelled，避免重启后悬挂）。"""
@@ -297,6 +298,22 @@ class TaskManager:
 
     def attach_handle(self, task_id: str, handle: asyncio.Task) -> None:
         self._task_handles[task_id] = handle
+
+    # ---------- Sandbox 注册表 ----------
+    def register_sandbox(self, task_id: str, sandbox: Any) -> None:
+        """注册活跃的 JupyterSandbox（orchestrator 在 async with 内调用）。"""
+        self._sandboxes[task_id] = sandbox
+
+    def unregister_sandbox(self, task_id: str) -> None:
+        self._sandboxes.pop(task_id, None)
+
+    async def interrupt_task(self, task_id: str) -> bool:
+        """向活跃 sandbox 发送中断信号。无活跃 sandbox 返回 False。"""
+        sandbox = self._sandboxes.get(task_id)
+        if sandbox:
+            await sandbox.interrupt()
+            return True
+        return False
 
     def _maybe_evict(self) -> None:
         """内存任务数超限时，淘汰最老的已完结任务，防止内存无限增长。"""

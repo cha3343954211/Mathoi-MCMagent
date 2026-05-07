@@ -8,13 +8,13 @@ import { FilesPanel } from './components/FilesPanel'
 import { ModelConfig } from './components/ModelConfig'
 import { AuthPage } from './components/AuthPage'
 import { AdminPanel } from './components/AdminPanel'
-import { api } from './api'
+import { api, WsStatus } from './api'
 import clsx from 'clsx'
 
 type Tab = 'trace' | 'files'
 
 export default function App() {
-  const { user, authReady, current, bootstrap, logout, removeTask } = useStore()
+  const { user, authReady, current, bootstrap, logout, removeTask, wsStatus, interruptCurrent } = useStore()
   const [tab, setTab]               = useState<Tab>('trace')
   const [showCreate, setShowCreate]  = useState(false)
   const [showModels, setShowModels]  = useState(false)
@@ -24,6 +24,25 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleting, setDeleting]      = useState(false)
   const [collapsed, setCollapsed]    = useState(false)
+  const [interruptMsg, setInterruptMsg] = useState('')
+  const [runSecs, setRunSecs]         = useState(0)
+
+  // 运行计时器——任务处于 running 时开始计时
+  useEffect(() => {
+    if (current?.state === 'running') {
+      const start = current.updated_at ? current.updated_at * 1000 : Date.now()
+      const id = setInterval(() => setRunSecs(Math.floor((Date.now() - start) / 1000)), 1000)
+      return () => clearInterval(id)
+    } else {
+      setRunSecs(0)
+    }
+  }, [current?.state, current?.task_id])
+
+  const fmtDuration = (s: number) => {
+    if (s < 60) return `${s}s`
+    if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+  }
 
   useEffect(() => { bootstrap() }, [])
 
@@ -184,16 +203,38 @@ export default function App() {
 
               {/* 操作按钮 */}
               <div className="flex items-center gap-1.5 shrink-0">
+                {/* WS 连接状态 */}
+                {current && <WsBadge status={wsStatus} />}
+                {/* 运行计时 */}
+                {current?.state === 'running' && runSecs > 0 && (
+                  <span className="text-[11px] text-ink-400 font-mono">{fmtDuration(runSecs)}</span>
+                )}
+                {/* 中断 Kernel（仅运行中，停止死循环） */}
+                {current?.state === 'running' && (
+                  <button
+                    title="中断当前代码执行（停止死循环）"
+                    onClick={async () => {
+                      const msg = await interruptCurrent()
+                      setInterruptMsg(msg)
+                      setTimeout(() => setInterruptMsg(''), 3000)
+                    }}
+                    className="text-xs px-2.5 py-1.5 text-orange-600 hover:bg-orange-50 rounded-lg transition-colors border border-orange-200">
+                    ■ 中断
+                  </button>
+                )}
                 {/* 取消（仅运行中/暂停/等待时） */}
                 {['running', 'paused', 'awaiting_hitl', 'pending'].includes(current.state) && (
                   <button onClick={async () => {
                     try { await api.cancel(current.task_id) } catch {}
-                    // 兜底：无论 WebSocket 是否及时推送，主动刷新状态
                     setTimeout(() => useStore.getState().refreshCurrent(), 400)
                   }}
                     className="text-xs px-2.5 py-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-red-200">
                     取消运行
                   </button>
+                )}
+                {/* 中断提示 */}
+                {interruptMsg && (
+                  <span className="text-[11px] text-orange-600 bg-orange-50 px-2 py-1 rounded">{interruptMsg}</span>
                 )}
                 {/* 删除任务 */}
                 {!confirmDelete ? (
@@ -300,6 +341,25 @@ function StateBadge({ state }: { state: string }) {
     <span className={clsx('px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0',
       map[state] || 'bg-ink-100 text-ink-500')}>
       {label[state] || state}
+    </span>
+  )
+}
+
+// ----------------------------------------------------------------
+// WsBadge —— WebSocket 连接状态指示
+// ----------------------------------------------------------------
+function WsBadge({ status }: { status: WsStatus }) {
+  const cfg: Record<WsStatus, { dot: string; text: string }> = {
+    connected:    { dot: 'bg-emerald-400', text: '已连接' },
+    connecting:   { dot: 'bg-blue-400 animate-pulse', text: '连接中' },
+    reconnecting: { dot: 'bg-yellow-400 animate-pulse', text: '重连中' },
+    closed:       { dot: 'bg-ink-300', text: '已断开' },
+  }
+  const { dot, text } = cfg[status]
+  return (
+    <span className="flex items-center gap-1 text-[10px] text-ink-500" title={`实时连接：${text}`}>
+      <span className={clsx('w-1.5 h-1.5 rounded-full', dot)} />
+      {text}
     </span>
   )
 }

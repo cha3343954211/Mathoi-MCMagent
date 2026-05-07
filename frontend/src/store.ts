@@ -1,12 +1,12 @@
 import { create } from 'zustand'
-import { api, Task, TraceEvent, User, tokenStore, setUnauthorizedHandler } from './api'
+import { api, Task, TraceEvent, User, WsStatus, ReconnectingWS, tokenStore, setUnauthorizedHandler } from './api'
 
 interface State {
   // 认证
   user: User | null
   authReady: boolean
   login: (username: string, password: string) => Promise<void>
-  register: (username: string, email: string, password: string) => Promise<void>
+  register: (username: string, password: string, email?: string) => Promise<void>
   logout: () => void
   bootstrap: () => Promise<void>
 
@@ -15,7 +15,8 @@ interface State {
   currentId: string | null
   current: Task | null
   events: TraceEvent[]
-  ws: WebSocket | null
+  ws: ReconnectingWS | null
+  wsStatus: WsStatus
   /** 实时输出缓冲：agent 名 → 已累积的流式内容 */
   streamingContent: Record<string, string>
 
@@ -25,6 +26,7 @@ interface State {
   refreshCurrent: () => Promise<void>
   appendEvent: (e: TraceEvent) => void
   removeTask: (id: string) => Promise<void>
+  interruptCurrent: () => Promise<string>
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -35,11 +37,12 @@ export const useStore = create<State>((set, get) => ({
   current: null,
   events: [],
   ws: null,
+  wsStatus: 'closed' as WsStatus,
   streamingContent: {},
 
   bootstrap: async () => {
     setUnauthorizedHandler(() => {
-      set({ user: null, tasks: [], current: null, currentId: null, events: [], ws: null, streamingContent: {} })
+      set({ user: null, tasks: [], current: null, currentId: null, events: [], ws: null, wsStatus: 'closed', streamingContent: {} })
     })
     if (!tokenStore.get()) {
       set({ authReady: true })
@@ -62,8 +65,8 @@ export const useStore = create<State>((set, get) => ({
     await get().loadTasks()
   },
 
-  register: async (username, email, password) => {
-    const r = await api.register(username, email, password)
+  register: async (username, password, email?) => {
+    const r = await api.register(username, password, email)
     tokenStore.set(r.access_token)
     set({ user: r.user })
     await get().loadTasks()
@@ -71,9 +74,9 @@ export const useStore = create<State>((set, get) => ({
 
   logout: () => {
     const { ws } = get()
-    if (ws) ws.close()
+    ws?.close()
     tokenStore.clear()
-    set({ user: null, tasks: [], current: null, currentId: null, events: [], ws: null })
+    set({ user: null, tasks: [], current: null, currentId: null, events: [], ws: null, wsStatus: 'closed' })
   },
 
   loadTasks: async () => {
@@ -83,19 +86,22 @@ export const useStore = create<State>((set, get) => ({
 
   selectTask: async (id) => {
     const { ws } = get()
-    if (ws) ws.close()
-    // 切换任务时立即清空前一个任务的流式缓冲，避免 UI 残影
-    set({ streamingContent: {} })
+    ws?.close()
+    set({ streamingContent: {}, wsStatus: 'connecting' })
     const [task, events] = await Promise.all([api.getTask(id), api.history(id)])
     set({ currentId: id, current: task, events })
-    const newWs = api.openWS(id, e => get().appendEvent(e))
+    const newWs = api.openWS(
+      id,
+      e => get().appendEvent(e),
+      s => set({ wsStatus: s }),
+    )
     set({ ws: newWs })
   },
 
   closeCurrent: () => {
     const { ws } = get()
-    if (ws) ws.close()
-    set({ currentId: null, current: null, events: [], ws: null, streamingContent: {} })
+    ws?.close()
+    set({ currentId: null, current: null, events: [], ws: null, wsStatus: 'closed', streamingContent: {} })
   },
 
   refreshCurrent: async () => {
@@ -141,6 +147,17 @@ export const useStore = create<State>((set, get) => ({
     }
     if (e.type.startsWith('task.') || e.type.startsWith('hitl.') || e.type.startsWith('phase.')) {
       get().refreshCurrent()
+    }
+  },
+
+  interruptCurrent: async () => {
+    const id = get().currentId
+    if (!id) return '无当前任务'
+    try {
+      const r = await api.interrupt(id)
+      return r.message
+    } catch (e: any) {
+      return e?.message || '中断失败'
     }
   },
 

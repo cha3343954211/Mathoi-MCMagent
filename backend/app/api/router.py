@@ -66,10 +66,72 @@ def _ensure_owner_or_admin(t, user: User) -> None:
 # ---------- 健康 ----------
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "mathoi-agent"}
+    import time as _t
+    from sqlalchemy import text as _text
+    db_ok = True
+    try:
+        async with AsyncSessionLocal() as _s:
+            await _s.execute(_text("SELECT 1"))
+    except Exception:
+        db_ok = False
+    tasks = task_manager._tasks
+    by_state: dict[str, int] = {}
+    for _t2 in tasks.values():
+        by_state[_t2.state.value] = by_state.get(_t2.state.value, 0) + 1
+    return {
+        "ok": True,
+        "service": "mathoi-agent",
+        "db": "ok" if db_ok else "error",
+        "tasks_in_memory": len(tasks),
+        "by_state": by_state,
+        "active_kernels": len(task_manager._sandboxes),
+        "ts": _t.time(),
+    }
 
 
 # ---------- 模型配置（当前用户视角） ----------
+# ---------- API Key 校验 ----------
+class ValidateKeyRequest(BaseModel):
+    model: str
+    api_key: str
+    base_url: Optional[str] = None
+
+
+@router.post("/models/validate")
+async def validate_api_key(
+    body: ValidateKeyRequest,
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """发送一条测试请求，验证 API Key / Base URL / 模型 ID 是否可用。"""
+    try:
+        import litellm
+        params: dict[str, Any] = {
+            "model": body.model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+            "api_key": body.api_key,
+        }
+        if body.base_url:
+            params["api_base"] = body.base_url
+        await litellm.acompletion(**params)
+        return {"valid": True, "message": "✓ API Key 验证成功"}
+    except Exception as e:
+        err = str(e)
+        if "401" in err or "Unauthorized" in err or "invalid" in err.lower():
+            msg = "✗ API Key 无效或已过期"
+        elif "404" in err or "not found" in err.lower():
+            msg = "✗ 模型 ID 不存在或 Base URL 错误"
+        elif "429" in err or "rate" in err.lower():
+            msg = "✗ 请求过于频繁，请稍后再试"
+        elif "403" in err or "Forbidden" in err:
+            msg = "✗ 权限不足或余额不足"
+        elif "connect" in err.lower() or "timeout" in err.lower():
+            msg = "✗ 无法连接到接口，请检查 Base URL"
+        else:
+            msg = f"✗ 验证失败: {err[:80]}"
+        return {"valid": False, "message": msg}
+
+
 class UserModelUpdate(BaseModel):
     agent: str = Field(..., pattern=r"^(default|coordinator|modeler|coder|writer)$")
     backend: Optional[str] = Field(None, pattern=r"^(openai|litellm)$")
@@ -293,6 +355,14 @@ async def cancel(task_id: str, user: User = Depends(get_current_user)) -> dict[s
     return {"ok": True}
 
 
+@router.post("/tasks/{task_id}/interrupt")
+async def interrupt_task(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """向当前正在执行代码的 Kernel 发送中断信号，停止死循环。"""
+    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    ok = await task_manager.interrupt_task(task_id)
+    return {"ok": ok, "message": "已发送中断信号" if ok else "无活跃 Kernel，任务可能已完成"}
+
+
 @router.post("/tasks/{task_id}/retry")
 async def retry(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """重试失败/取消的任务：清空错误、重置状态、重新启动工作流。"""
@@ -503,6 +573,14 @@ def _py_to_ipynb(code: str) -> str:
 
 
 # ---------- WebSocket ----------
+def _ws_is_closed(ws: WebSocket) -> bool:
+    from starlette.websockets import WebSocketState
+    return (
+        ws.client_state != WebSocketState.CONNECTED
+        or ws.application_state != WebSocketState.CONNECTED
+    )
+
+
 @router.websocket("/ws/tasks/{task_id}")
 async def ws_task(ws: WebSocket, task_id: str) -> None:
     token = ws.query_params.get("token")
@@ -518,11 +596,32 @@ async def ws_task(ws: WebSocket, task_id: str) -> None:
     queue = await bus.subscribe(task_id)
     try:
         while True:
-            event = await queue.get()
-            await ws.send_text(json.dumps(event.to_dict(), ensure_ascii=False, default=str))
+            if _ws_is_closed(ws):
+                break
+            try:
+                # wait_for 让我们可以定期检查 WS 是否已关闭（心跳间隔 20s）
+                event = await asyncio.wait_for(queue.get(), timeout=20.0)
+            except asyncio.TimeoutError:
+                # 发送 ping 保活（空 JSON 忽略即可）
+                try:
+                    await ws.send_text("{\"type\":\"ping\"}")
+                except Exception:
+                    break
+                continue
+            if _ws_is_closed(ws):
+                break
+            try:
+                await ws.send_text(json.dumps(event.to_dict(), ensure_ascii=False, default=str))
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            except Exception as e:
+                if "send" in str(e).lower() or "close" in str(e).lower():
+                    break
+                logger.warning("ws send error: {}", e)
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.warning("ws error: {}", e)
     finally:
         await bus.unsubscribe(task_id, queue)
+        logger.debug("ws closed | task={}", task_id)

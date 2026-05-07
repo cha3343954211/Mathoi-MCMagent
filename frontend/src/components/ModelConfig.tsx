@@ -93,6 +93,39 @@ interface AgentFormProps {
   effectiveIsDefault?: boolean
 }
 
+// ================================================================
+// ValidateKeyBtn —— 实时验证 API Key 可用性
+// ================================================================
+function ValidateKeyBtn({ model, apiKey, baseUrl }: { model: string; apiKey: string; baseUrl: string }) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'fail'>('idle')
+  const [msg, setMsg]       = useState('')
+
+  const validate = async () => {
+    if (!model || !apiKey) { setMsg('请先填写 Model 和 API Key'); setStatus('fail'); return }
+    setStatus('loading'); setMsg('')
+    try {
+      const r = await api.validateApiKey(model, apiKey, baseUrl || undefined)
+      setStatus(r.valid ? 'ok' : 'fail')
+      setMsg(r.message)
+    } catch (e: any) {
+      setStatus('fail'); setMsg(e?.message || '请求失败')
+    }
+    setTimeout(() => setStatus('idle'), 8000)
+  }
+
+  return (
+    <div className="mt-1.5 flex items-center gap-2">
+      <button type="button" onClick={validate} disabled={status === 'loading' || !model || !apiKey}
+        className="text-[11px] px-2.5 py-1 rounded border border-ink-200 text-ink-600 hover:bg-ink-50 disabled:opacity-40">
+        {status === 'loading' ? '验证中…' : '验证连通性'}
+      </button>
+      {msg && (
+        <span className={`text-[11px] ${status === 'ok' ? 'text-emerald-600' : 'text-red-500'}`}>{msg}</span>
+      )}
+    </div>
+  )
+}
+
 function AgentForm({ agent, state, onChange, onSave, saving, hasKey, showPrice, effectiveModel, effectiveIsDefault }: AgentFormProps) {
   const set = (k: keyof FormState, v: any) => onChange({ ...state, [k]: v })
 
@@ -142,12 +175,13 @@ function AgentForm({ agent, state, onChange, onSave, saving, hasKey, showPrice, 
           baseUrl={state.base_url} apiKey={state.api_key} agent={agent} />
       </div>
 
-      {/* API Key */}
+      {/* API Key + 验证 */}
       <div>
         <p className="text-ink-500 mb-1">API Key</p>
         <input type="password" value={state.api_key} onChange={e => set('api_key', e.target.value)}
           placeholder={hasKey ? '已保存（留空则不改动）' : 'sk-...'}
           className="w-full px-2 py-1.5 border border-ink-200 rounded focus:outline-none focus:border-ink-500" />
+        <ValidateKeyBtn model={state.model} apiKey={state.api_key} baseUrl={state.base_url} />
       </div>
 
       {/* Max Tokens */}

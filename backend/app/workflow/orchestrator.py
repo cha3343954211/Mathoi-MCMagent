@@ -54,6 +54,7 @@ async def run_workflow(task_id: str) -> None:
 
     try:
         async with JupyterSandbox(task_id, work_dir) as sandbox:
+            task_manager.register_sandbox(task_id, sandbox)   # 中断接口可用
             tools = build_default_registry(sandbox, work_dir)
             data_summary = _describe_data(work_dir, task.data_files)
 
@@ -333,12 +334,15 @@ async def run_workflow(task_id: str) -> None:
             await emit(EventType.PHASE_EXIT, task_id, phase="writer")
             await task_manager.update_state(task_id, TaskState.COMPLETED)
             await emit(EventType.TASK_COMPLETED, task_id)
+        # async with JupyterSandbox 退出时 sandbox 自动关闭
+        task_manager.unregister_sandbox(task_id)
 
     except asyncio.CancelledError:
-        # 任务被主动取消（cancel() 已写入 CANCELLED 状态并发出事件，这里只需清理）
+        task_manager.unregister_sandbox(task_id)
         logger.info("workflow cancelled | task={}", task_id)
-        raise  # 让 asyncio 正常完成 Task 的取消流程
+        raise
     except Exception as e:
+        task_manager.unregister_sandbox(task_id)
         logger.exception("workflow failed")
         await task_manager.update_state(task_id, TaskState.FAILED, error=str(e))
         await emit(EventType.TASK_FAILED, task_id, error=str(e))

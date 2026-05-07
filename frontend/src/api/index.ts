@@ -185,10 +185,11 @@ export const api = {
     request<{ access_token: string; user: User }>('/api/auth/login', {
       method: 'POST', body: JSON.stringify({ username, password })
     }, { auth: false }),
-  register: (username: string, email: string, password: string) =>
+  register: (username: string, password: string, email?: string) =>
     request<{ access_token: string; user: User }>('/api/auth/register', {
-      method: 'POST', body: JSON.stringify({ username, email, password })
+      method: 'POST', body: JSON.stringify({ username, password, ...(email ? { email } : {}) })
     }, { auth: false }),
+  health: () => request<any>('/api/health', {}, { auth: false }),
   me: () => request<User>('/api/auth/me'),
   changePassword: (old_password: string, new_password: string) =>
     request<{ ok: boolean }>('/api/auth/change-password', {
@@ -202,6 +203,7 @@ export const api = {
   pause: (id: string) => request<any>(`/api/tasks/${id}/pause`, { method: 'POST' }),
   resume: (id: string) => request<any>(`/api/tasks/${id}/resume`, { method: 'POST' }),
   cancel: (id: string) => request<any>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+  interrupt: (id: string) => request<{ ok: boolean; message: string }>(`/api/tasks/${id}/interrupt`, { method: 'POST' }),
   retryTask: (id: string) => request<any>(`/api/tasks/${id}/retry`, { method: 'POST' }),
   deleteTask: (id: string) => request<any>(`/api/tasks/${id}`, { method: 'DELETE' }),
   hitl: (id: string, body: any) => request<any>(`/api/tasks/${id}/hitl`, {
@@ -247,6 +249,11 @@ export const api = {
     }),
   updateMyModel: (body: Partial<AgentCfg> & { agent: string; api_key?: string }) =>
     request<any>('/api/models/mine', { method: 'POST', body: JSON.stringify(body) }),
+  validateApiKey: (model: string, api_key: string, base_url?: string) =>
+    request<{ valid: boolean; message: string }>('/api/models/validate', {
+      method: 'POST', body: JSON.stringify({ model, api_key, base_url })
+    }),
+
   // 用户获取可选预设
   getAvailablePresets: (agent = 'all') =>
     request<{ presets: ModelPreset[] }>(`/api/models/presets?agent=${encodeURIComponent(agent)}`),
@@ -297,11 +304,78 @@ export const api = {
     request<{ user: any; total: UsageSummary; default_model: any; recent: any[] }>(`/api/admin/users/${id}/usage`),
 
   // WebSocket
-  openWS: (id: string, onEvent: (e: TraceEvent) => void) => {
+  openWS: (id: string, onEvent: (e: TraceEvent) => void, onStatus?: (s: WsStatus) => void) => {
+    return new ReconnectingWS(id, onEvent, onStatus)
+  }
+}
+
+// ---------- WS 状态 ----------
+export type WsStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed'
+
+/** 带指数退避自动重连的 WebSocket 封装。 */
+export class ReconnectingWS {
+  private socket: WebSocket | null = null
+  private retries = 0
+  private maxRetries = 15
+  private closed = false
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private taskId: string
+  private onEvent: (e: TraceEvent) => void
+  private onStatus?: (s: WsStatus) => void
+
+  constructor(taskId: string, onEvent: (e: TraceEvent) => void, onStatus?: (s: WsStatus) => void) {
+    this.taskId = taskId
+    this.onEvent = onEvent
+    this.onStatus = onStatus
+    this._connect()
+  }
+
+  private _connect() {
+    if (this.closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const t = tokenStore.get()
-    const ws = new WebSocket(`${proto}://${location.host}/api/ws/tasks/${id}?token=${encodeURIComponent(t)}`)
-    ws.onmessage = ev => { try { onEvent(JSON.parse(ev.data)) } catch {} }
-    return ws
+    const url = `${proto}://${location.host}/api/ws/tasks/${this.taskId}?token=${encodeURIComponent(t)}`
+    this.onStatus?.(this.retries === 0 ? 'connecting' : 'reconnecting')
+    const ws = new WebSocket(url)
+    this.socket = ws
+    ws.onopen = () => {
+      this.retries = 0
+      this.onStatus?.('connected')
+    }
+    ws.onmessage = ev => {
+      try {
+        const data = JSON.parse(ev.data)
+        if (data?.type === 'ping') return  // 过滤心跳
+        this.onEvent(data)
+      } catch {}
+    }
+    ws.onclose = ev => {
+      if (this.closed) return
+      // 4401/4403 认证错误，不重连
+      if (ev.code === 4401 || ev.code === 4403) {
+        this.closed = true
+        this.onStatus?.('closed')
+        return
+      }
+      this.retries++
+      if (this.retries > this.maxRetries) {
+        this.closed = true
+        this.onStatus?.('closed')
+        return
+      }
+      // 指数退避：500ms * 2^retries，最大 30s
+      const delay = Math.min(500 * Math.pow(2, this.retries - 1), 30000)
+      this.onStatus?.('reconnecting')
+      this.timer = setTimeout(() => this._connect(), delay)
+    }
+    ws.onerror = () => {}  // onclose 会随即触发
+  }
+
+  close() {
+    this.closed = true
+    if (this.timer) clearTimeout(this.timer)
+    this.socket?.close()
+    this.socket = null
+    this.onStatus?.('closed')
   }
 }

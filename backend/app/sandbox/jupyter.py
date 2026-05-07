@@ -71,6 +71,17 @@ class JupyterSandbox:
         self._kc: Any = None
         self._image_seq = 0
         self._lock = asyncio.Lock()
+        self._interrupt_requested: bool = False  # 用户发起的中断标志
+
+    async def interrupt(self) -> None:
+        """中断当前正在执行的代码（等价于 Jupyter 的 '■ Stop' 按钮）。"""
+        self._interrupt_requested = True
+        if self._km:
+            try:
+                await self._km.interrupt_kernel()
+                logger.info("Kernel interrupt sent | task={}", self.task_id)
+            except Exception as e:
+                logger.warning("Kernel interrupt failed: {} | task={}", e, self.task_id)
 
     async def start(self) -> None:
         settings = get_settings()
@@ -297,6 +308,12 @@ class JupyterSandbox:
             elif mtype == "status" and content.get("execution_state") == "idle":
                 break
 
+        # 清除中断标志
+        if self._interrupt_requested:
+            self._interrupt_requested = False
+            if not result.error:
+                result.success = False
+                result.error = "KeyboardInterrupt: 任务被用户中断"
         return result
 
     def _save_image(self, b64: str, ext: str) -> Path:
