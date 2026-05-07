@@ -160,6 +160,12 @@ export interface Stats {
   usage: Overview
 }
 
+export interface SystemSettings {
+  openalex_email: string
+  /** 来源：'db' | 'env' | 'unset'，仅展示用 */
+  openalex_email_source: string
+}
+
 export interface AgentUsageStat {
   calls: number; prompt_tokens: number; completion_tokens: number
   total_tokens: number; cost_usd: number; model: string
@@ -306,6 +312,14 @@ export const api = {
   adminUsageByModel: () => request<ModelUsage[]>('/api/admin/usage/by-model'),
   adminUserUsage: (id: number) =>
     request<{ user: any; total: UsageSummary; default_model: any; recent: any[] }>(`/api/admin/users/${id}/usage`),
+
+  // 系统设置（OpenAlex email 等）
+  adminGetSettings: () =>
+    request<SystemSettings>('/api/admin/settings'),
+  adminUpdateSettings: (body: Partial<{ openalex_email: string }>) =>
+    request<SystemSettings>('/api/admin/settings', {
+      method: 'PUT', body: JSON.stringify(body),
+    }),
 
   // WebSocket
   openWS: (id: string, onEvent: (e: TraceEvent) => void, onStatus?: (s: WsStatus) => void) => {

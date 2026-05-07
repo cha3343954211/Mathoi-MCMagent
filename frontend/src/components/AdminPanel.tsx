@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { api, AdminTask, AdminUser, ModelUsage, Overview, Stats, TaskFileStat, UserFileStat, UserUsage } from '../api'
+import { api, AdminTask, AdminUser, ModelUsage, Overview, Stats, SystemSettings, TaskFileStat, UserFileStat, UserUsage } from '../api'
 import { AdminModelConfig } from './ModelConfig'
 
-type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files'
+type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files' | 'settings'
 
 export function AdminPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>('overview')
@@ -15,7 +15,8 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           <div className="flex bg-ink-100 rounded p-0.5 text-xs ml-3">
             {([
               ['overview', '概览'], ['users', '用户'], ['tasks', '任务'],
-              ['models', '默认模型'], ['usage', '用量'], ['files', '文件管理']
+              ['models', '默认模型'], ['usage', '用量'], ['files', '文件管理'],
+              ['settings', '设置']
             ] as [Tab, string][]).map(([k, v]) => (
               <button key={k} onClick={() => setTab(k)}
                 className={`px-3 py-1 rounded ${tab === k ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{v}</button>
@@ -31,6 +32,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           {tab === 'models' && <AdminModelConfig />}
           {tab === 'usage' && <UsageTab />}
           {tab === 'files' && <FilesTab />}
+          {tab === 'settings' && <SettingsTab />}
         </div>
       </div>
     </div>
@@ -553,6 +555,121 @@ function UserUsageDialog({ userId, onClose }: { userId: number; onClose: () => v
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+
+// ---------- 系统设置 ----------
+function SettingsTab() {
+  const [data, setData] = useState<SystemSettings | null>(null)
+  const [email, setEmail] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
+  const reload = async () => {
+    try {
+      const s = await api.adminGetSettings()
+      setData(s)
+      setEmail(s.openalex_email || '')
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.message || '加载失败' })
+    }
+  }
+  useEffect(() => { reload() }, [])
+
+  const onSave = async (clear = false) => {
+    setSaving(true); setMsg(null)
+    try {
+      const next = await api.adminUpdateSettings({ openalex_email: clear ? '' : email.trim() })
+      setData(next)
+      setEmail(next.openalex_email || '')
+      setMsg({ type: 'ok', text: clear ? '已清除 DB 配置' : '保存成功' })
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.message || '保存失败' })
+    } finally {
+      setSaving(false)
+      setTimeout(() => setMsg(null), 3000)
+    }
+  }
+
+  if (!data) return <p className="p-6 text-xs text-ink-400">加载中…</p>
+
+  const sourceLabel: Record<string, { text: string; cls: string }> = {
+    db:    { text: '数据库（管理员设置）', cls: 'text-green-700 bg-green-50 border-green-200' },
+    env:   { text: '环境变量（.env 兜底）', cls: 'text-blue-700 bg-blue-50 border-blue-200' },
+    unset: { text: '未配置（OpenAlex 检索将跳过）', cls: 'text-amber-700 bg-amber-50 border-amber-200' },
+  }
+  const src = sourceLabel[data.openalex_email_source] ?? sourceLabel.unset
+
+  return (
+    <div className="p-6 max-w-2xl space-y-6">
+      {/* OpenAlex Email */}
+      <section className="border border-ink-200 rounded-lg p-5">
+        <header className="flex items-baseline justify-between mb-2">
+          <h3 className="text-sm font-semibold">OpenAlex 学术检索 Email</h3>
+          <span className={`text-[11px] px-2 py-0.5 border rounded ${src.cls}`}>
+            当前生效来源：{src.text}
+          </span>
+        </header>
+        <p className="text-xs text-ink-500 leading-relaxed mb-3">
+          Writer 调用 <code className="px-1 py-0.5 bg-ink-100 rounded text-[11px]">search_papers</code> 工具
+          时通过该邮箱进入 OpenAlex
+          <a className="text-blue-600 hover:underline mx-1"
+             href="https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication#the-polite-pool"
+             target="_blank" rel="noreferrer">polite pool</a>
+          ，享受更稳定的 API 配额（必填，否则跳过文献搜索功能）。
+          <br />
+          DB 值优先于 <code className="px-1 py-0.5 bg-ink-100 rounded text-[11px]">.env</code> 中的 <code>OPENALEX_EMAIL</code>，
+          清除 DB 值后将回退到环境变量。
+        </p>
+
+        <div className="flex gap-2">
+          <input
+            type="email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="your@email.com"
+            className="flex-1 px-3 py-2 border border-ink-200 rounded text-sm focus:outline-none focus:border-ink-500"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button
+            onClick={() => onSave(false)}
+            disabled={saving || !email.trim() || email.trim() === data.openalex_email}
+            className="px-4 py-2 bg-ink-800 text-white rounded text-sm hover:bg-ink-700 disabled:bg-ink-300 disabled:cursor-not-allowed">
+            {saving ? '保存中…' : '保存'}
+          </button>
+          {data.openalex_email_source === 'db' && (
+            <button
+              onClick={() => onSave(true)}
+              disabled={saving}
+              title="清除数据库中的值，回退到 .env"
+              className="px-3 py-2 border border-ink-300 text-ink-700 rounded text-sm hover:bg-ink-50">
+              清除
+            </button>
+          )}
+        </div>
+
+        {msg && (
+          <p className={`mt-3 text-xs ${msg.type === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+            {msg.text}
+          </p>
+        )}
+      </section>
+
+      {/* 提示卡 */}
+      <section className="border border-ink-200 rounded-lg p-5 bg-ink-50/50">
+        <h3 className="text-sm font-semibold mb-2">关于学术文献检索</h3>
+        <ul className="text-xs text-ink-600 space-y-1.5 leading-relaxed list-disc list-inside">
+          <li>启用后，Writer 在撰写「问题分析」「模型建立与求解」等章节时会自动调用 OpenAlex 搜索相关文献。</li>
+          <li>检索结果以 <span className="font-mono">GB/T 7714-2015</span> 格式呈现，可直接用于参考文献章节。</li>
+          <li>邮箱仅用于身份标识，OpenAlex 不发送任何邮件，参考其
+            <a className="text-blue-600 hover:underline mx-0.5" href="https://docs.openalex.org/" target="_blank" rel="noreferrer">官方文档</a>。
+          </li>
+          <li>未配置时不会报错，Writer 将跳过文献检索环节继续写作。</li>
+        </ul>
+      </section>
     </div>
   )
 }

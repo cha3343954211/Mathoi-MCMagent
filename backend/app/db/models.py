@@ -147,6 +147,17 @@ class EventRecord(Base):
     timestamp: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class SystemSetting(Base):
+    """系统级键值配置，供管理员通过 UI 修改（如 OpenAlex email）。
+    优先级：DB 值 > 环境变量 > 代码默认值。
+    """
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now, nullable=False)
+
+
 class UsageRecord(Base):
     """每次 LLM 调用的计量记录。"""
     __tablename__ = "usage_records"

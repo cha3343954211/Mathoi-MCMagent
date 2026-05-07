@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import require_admin
 from ..auth.security import hash_password
-from ..db import ModelConfigRow, ModelPreset, TaskRecord, User, UserRole, get_session
+from ..db import ModelConfigRow, ModelPreset, SystemSetting, TaskRecord, User, UserRole, get_session
 from ..services.model_service import (
     PRESET_AGENTS, create_preset, delete_preset, list_configs, list_presets,
     select_user_preset, set_default_preset, upsert_config, update_preset,
@@ -496,3 +496,61 @@ async def usage_for_user(user_id: int, session: AsyncSession = Depends(get_sessi
         raise HTTPException(404, "用户不存在")
     data = await stats_for_user(session, user_id)
     return {"user": {"id": u.id, "username": u.username, "email": u.email, "role": u.role}, **data}
+
+
+# ---------- System Settings ----------
+# 白名单：仅允许通过 UI 修改这些键，避免任意键被注入
+_ALLOWED_SETTING_KEYS = {"openalex_email"}
+
+
+class SettingsOut(BaseModel):
+    openalex_email: str = ""
+    openalex_email_source: str = "unset"   # 'db' | 'env' | 'unset'
+
+
+class SettingsUpdate(BaseModel):
+    openalex_email: Optional[str] = Field(default=None, max_length=255)
+
+
+@router.get("/settings", response_model=SettingsOut)
+async def get_system_settings(session: AsyncSession = Depends(get_session)):
+    """获取系统设置。DB 值优先，env 作为兜底来源指示。"""
+    from ..core.config import get_settings as _gs
+    rows = (await session.execute(select(SystemSetting))).scalars().all()
+    db_kv = {r.key: r.value for r in rows}
+
+    env_email = (_gs().openalex_email or "").strip()
+    db_email = (db_kv.get("openalex_email") or "").strip()
+
+    if db_email:
+        return SettingsOut(openalex_email=db_email, openalex_email_source="db")
+    if env_email:
+        return SettingsOut(openalex_email=env_email, openalex_email_source="env")
+    return SettingsOut(openalex_email="", openalex_email_source="unset")
+
+
+@router.put("/settings", response_model=SettingsOut)
+async def update_system_settings(body: SettingsUpdate, session: AsyncSession = Depends(get_session)):
+    """更新系统设置。空字符串视为清除 DB 值（回退 env）。"""
+    updates = body.model_dump(exclude_none=True)
+    for key, value in updates.items():
+        if key not in _ALLOWED_SETTING_KEYS:
+            continue
+        # 简单校验
+        if key == "openalex_email" and value:
+            v = value.strip()
+            if "@" not in v or "." not in v.split("@", 1)[-1]:
+                raise HTTPException(400, "OpenAlex email 格式不正确")
+            value = v
+        # upsert
+        row = (await session.execute(
+            select(SystemSetting).where(SystemSetting.key == key)
+        )).scalar_one_or_none()
+        if row is None:
+            row = SystemSetting(key=key, value=value or "")
+            session.add(row)
+        else:
+            row.value = value or ""
+            row.updated_at = time.time()
+    await session.commit()
+    return await get_system_settings(session)

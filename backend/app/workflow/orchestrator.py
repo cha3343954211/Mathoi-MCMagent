@@ -256,9 +256,21 @@ async def run_workflow(task_id: str) -> None:
                     p.write_text(content, encoding="utf-8")
                 return p.read_text(encoding="utf-8")
 
-            writer_tools = build_writer_registry(
-                work_dir, openalex_email=settings.openalex_email
-            )
+            # OpenAlex email：DB 系统设置优先，回退 env
+            openalex_email = settings.openalex_email or ""
+            try:
+                from ..db import AsyncSessionLocal, SystemSetting
+                from sqlalchemy import select as _select
+                async with AsyncSessionLocal() as _ss:
+                    row = (await _ss.execute(
+                        _select(SystemSetting).where(SystemSetting.key == "openalex_email")
+                    )).scalar_one_or_none()
+                    if row and row.value.strip():
+                        openalex_email = row.value.strip()
+            except Exception as _e:
+                logger.warning("read openalex_email from DB failed (use env): {}", _e)
+
+            writer_tools = build_writer_registry(work_dir, openalex_email=openalex_email)
 
             async def _write_section(phase: str, prompt: str, sec_file: str) -> str:
                 await emit(EventType.PHASE_ENTER, task_id, phase=phase)
