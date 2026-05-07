@@ -90,19 +90,20 @@ export default function App() {
   return (
     // h-dvh: 移动端地址栏自适应（比 h-screen / h-full 更可靠）
     <div className="h-dvh flex">
-      {/* ======== 移动端遗罩层 ======== */}
+      {/* ======== 移动端遮罩层（z-[50]：覆盖 HITLPanel z-40，低于侧边栏 z-[60]）======== */}
       {mobileOpen && (
         <div
-          className="fixed inset-0 bg-black/30 z-30 sm:hidden"
+          className="fixed inset-0 bg-black/40 z-[50] sm:hidden"
           onClick={() => setMobileOpen(false)}
         />
       )}
 
       {/* ======== 侧边栏 ======== */}
       <aside className={clsx(
-        'bg-white border-r border-ink-200 flex-col transition-all duration-200 ease-in-out overflow-hidden',
-        // 移动端：fixed 抽屉（z-40 > 遮罩 z-30）
-        'fixed inset-y-0 left-0 z-40 w-72',
+        // overflow-hidden 仅桌面生效（用于折叠宽度动画），移动端不需要（会裁切下拉菜单）
+        'bg-white border-r border-ink-200 flex-col transition-all duration-200 ease-in-out sm:overflow-hidden',
+        // 移动端：fixed 抽屉（z-[60]，高于遮罩 z-[50] 和 HITLPanel z-40）
+        'fixed inset-y-0 left-0 z-[60] w-72',
         // 桌面：回到正常文档流，宽度响应 collapsed
         'sm:relative sm:inset-y-auto sm:left-auto',
         collapsed ? 'sm:w-12' : 'sm:w-72',
@@ -186,7 +187,7 @@ export default function App() {
                 <ChevronIcon up={showUserMenu} />
               </button>
               {showUserMenu && (
-                <div className="absolute bottom-[60px] left-3 right-3 bg-white border border-ink-200 rounded-lg shadow-lg text-xs overflow-hidden z-10">
+                <div className="absolute bottom-full mb-1 left-0 right-0 mx-3 bg-white border border-ink-200 rounded-lg shadow-lg text-xs overflow-hidden z-[70]">
                   <button onClick={() => { setShowUserMenu(false); setShowChangePwd(true) }}
                     className="w-full text-left px-3 py-2.5 hover:bg-ink-50 flex items-center gap-2">
                     <KeyIcon /> 修改密码

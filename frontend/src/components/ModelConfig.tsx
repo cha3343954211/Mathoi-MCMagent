@@ -416,8 +416,28 @@ function PresetCard({
   p: ModelPreset; selectedId: number | null; saving: boolean
   onSelect: (id: number | null) => void
 }) {
-  const isSelected = selectedId === p.id
-  const isAutoDefault = p.is_default && selectedId === null  // 自动生效中（未显式选择）
+  const isSelected   = selectedId === p.id
+  const isAutoDefault = p.is_default && selectedId === null
+
+  // 连通性测试状态
+  const [testStatus, setTestStatus] = useState<'idle' | 'loading' | 'ok' | 'fail'>('idle')
+  const [testMsg,    setTestMsg]    = useState('')
+
+  const runTest = async (e: React.MouseEvent) => {
+    e.stopPropagation()                // 不触发卡片选中
+    if (testStatus === 'loading') return
+    if (!p.has_api_key) { setTestStatus('fail'); setTestMsg('✗ 未配置 API Key'); return }
+    setTestStatus('loading'); setTestMsg('')
+    try {
+      const r = await api.testPreset(p.id)
+      setTestStatus(r.valid ? 'ok' : 'fail')
+      setTestMsg(r.message)
+    } catch (e: any) {
+      setTestStatus('fail'); setTestMsg(e?.message || '请求失败')
+    }
+    setTimeout(() => { setTestStatus('idle'); setTestMsg('') }, 8000)
+  }
+
   return (
     <div
       onClick={() => !saving && onSelect(isSelected ? null : p.id)}
@@ -432,9 +452,10 @@ function PresetCard({
       {/* 选中指示圆 */}
       <div className="w-3 h-3 rounded-full border-2 flex items-center justify-center flex-shrink-0 mt-0.5"
         style={{ borderColor: isSelected ? '#3b82f6' : isAutoDefault ? '#f59e0b' : '#9ca3af' }}>
-        {isSelected   && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+        {isSelected    && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
         {isAutoDefault && <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />}
       </div>
+
       {/* 内容 */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
@@ -467,6 +488,23 @@ function PresetCard({
             点击可显式锁定此预设；或展开下方自定义配置覆盖。
           </p>
         )}
+
+        {/* 连通性测试 */}
+        <div className="mt-1.5 flex items-center gap-2" onClick={e => e.stopPropagation()}>
+          <button
+            type="button"
+            onClick={runTest}
+            disabled={testStatus === 'loading'}
+            className="text-[10px] px-2 py-0.5 rounded border border-ink-200 text-ink-500
+                       hover:bg-ink-50 hover:text-ink-700 disabled:opacity-40 transition-colors">
+            {testStatus === 'loading' ? '测试中…' : '测试连通性'}
+          </button>
+          {testMsg && (
+            <span className={`text-[10px] font-medium ${testStatus === 'ok' ? 'text-emerald-600' : 'text-red-500'}`}>
+              {testMsg}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   )

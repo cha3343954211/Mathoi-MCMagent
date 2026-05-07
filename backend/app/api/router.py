@@ -17,9 +17,10 @@ from ..core.events import bus
 from ..core.logging import logger
 from ..db import AsyncSessionLocal, User, get_session
 from ..services.model_service import (
-    DEFAULT_AGENTS, list_configs, list_presets, resolve_effective,
+    DEFAULT_AGENTS, _fetch_preset, list_configs, list_presets, resolve_effective,
     select_user_preset, upsert_config,
 )
+from ..core.crypto import decrypt
 from ..services.usage_service import stats_for_task
 from ..tasks import TaskState, task_manager
 from ..core.config import get_settings
@@ -97,24 +98,20 @@ class ValidateKeyRequest(BaseModel):
     base_url: Optional[str] = None
 
 
-@router.post("/models/validate")
-async def validate_api_key(
-    body: ValidateKeyRequest,
-    user: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    """发送一条测试请求，验证 API Key / Base URL / 模型 ID 是否可用。"""
+async def _do_model_test(model: str, api_key: str, base_url: Optional[str]) -> dict[str, Any]:
+    """公共连通性测试逻辑：发送最小 LLM 请求，返回 {valid, message}。"""
     try:
         import litellm
         params: dict[str, Any] = {
-            "model": body.model,
+            "model": model,
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 1,
-            "api_key": body.api_key,
+            "api_key": api_key,
         }
-        if body.base_url:
-            params["api_base"] = body.base_url
+        if base_url:
+            params["api_base"] = base_url
         await litellm.acompletion(**params)
-        return {"valid": True, "message": "✓ API Key 验证成功"}
+        return {"valid": True, "message": "✓ 连接成功"}
     except Exception as e:
         err = str(e)
         if "401" in err or "Unauthorized" in err or "invalid" in err.lower():
@@ -130,6 +127,29 @@ async def validate_api_key(
         else:
             msg = f"✗ 验证失败: {err[:80]}"
         return {"valid": False, "message": msg}
+
+
+@router.post("/models/validate")
+async def validate_api_key(
+    body: ValidateKeyRequest,
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """发送一条测试请求，验证 API Key / Base URL / 模型 ID 是否可用。"""
+    return await _do_model_test(body.model, body.api_key, body.base_url)
+
+
+@router.post("/models/presets/{preset_id}/test")
+async def test_preset_connectivity(
+    preset_id: int,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """使用预设服务端存储的密钥测试模型连通性（无需前端传入 API Key）。"""
+    p = await _fetch_preset(session, preset_id)
+    if p is None:
+        raise HTTPException(404, "预设不存在或已停用")
+    api_key = decrypt(p.api_key_enc) if p.api_key_enc else ""
+    return await _do_model_test(p.model, api_key, p.base_url or None)
 
 
 class UserModelUpdate(BaseModel):

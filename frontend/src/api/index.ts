@@ -254,6 +254,10 @@ export const api = {
       method: 'POST', body: JSON.stringify({ model, api_key, base_url })
     }),
 
+  // 预设连通性测试（服务端用存储密钥，无需前端传 key）
+  testPreset: (presetId: number) =>
+    request<{ valid: boolean; message: string }>(`/api/models/presets/${presetId}/test`, { method: 'POST' }),
+
   // 用户获取可选预设
   getAvailablePresets: (agent = 'all') =>
     request<{ presets: ModelPreset[] }>(`/api/models/presets?agent=${encodeURIComponent(agent)}`),
