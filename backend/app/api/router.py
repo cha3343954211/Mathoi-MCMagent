@@ -291,6 +291,8 @@ async def create_task(
 ) -> TaskResponse:
     if not title or len(problem) < 10:
         raise HTTPException(400, "title 与 problem（至少 10 字）必填")
+
+    # 先创建任务（获取 work_dir）
     t = await task_manager.create(user_id=user.id, title=title, problem=problem, data_files=[])
 
     data_saved: list[str] = []
@@ -301,16 +303,17 @@ async def create_task(
             continue
         safe_name = Path(f.filename).name
         (work_dir / safe_name).write_bytes(await f.read())
-        # 按 MIME 或扩展名区分图片 vs 数据
         is_img = (
             (f.content_type or "").split(";")[0].strip() in _IMAGE_MIMES
             or Path(safe_name).suffix.lower() in _IMAGE_EXTS
         )
         (img_saved if is_img else data_saved).append(safe_name)
 
+    # 同时更新内存对象和持久化
     t.data_files  = data_saved
     t.image_files = img_saved
     await task_manager.update_data_files(t.task_id, data_saved)
+    await task_manager.update_image_files(t.task_id, img_saved)
 
     handle = asyncio.create_task(_run_workflow_with_timeout(t.task_id))
     task_manager.attach_handle(t.task_id, handle)

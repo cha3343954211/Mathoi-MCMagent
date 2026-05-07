@@ -54,13 +54,14 @@ function DownloadLink({
   )
 }
 
-// ── 主组件 ────────────────────────────────────────────────────────────────────
+// ── 主组件 ──────────────────────────────────────────────────────────────────────────────
 export function FilesPanel() {
   const { current } = useStore()
   const [files, setFiles]       = useState<{ name: string; size: number }[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent]   = useState<string>('')
   const [loading, setLoading]   = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)  // 移动端可折叠
   const prevTaskId = useRef<string>('')
 
   // 文件列表刷新
@@ -110,16 +111,19 @@ export function FilesPanel() {
   return (
     <div className="h-full flex">
       {/* ── 左侧文件树 ── */}
-      <div className="w-56 flex-shrink-0 border-r border-ink-200 bg-white flex flex-col">
-        {/* 下载全部 */}
-        <div className="px-3 py-2 border-b border-ink-100 shrink-0">
+      <div className={clsx(
+        'flex-shrink-0 border-r border-ink-200 bg-white flex flex-col transition-all duration-200',
+        sidebarOpen ? 'w-48 sm:w-56' : 'w-0 overflow-hidden border-r-0'
+      )}>
+        {/* 头部：下载按钮 */}
+        <div className="px-3 py-2 border-b border-ink-100 shrink-0 flex items-center justify-between">
           <a href={api.archiveUrl(current.task_id)} download={`${current.task_id}.zip`}
             className="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-800 transition-colors">
-            <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+            <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
               <path d="M8.75 2.75a.75.75 0 0 0-1.5 0v5.69L5.03 6.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 8.44V2.75Z" />
               <path d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z" />
             </svg>
-            下载全部（ZIP）
+            <span className="truncate">下载 ZIP</span>
           </a>
         </div>
 
@@ -134,9 +138,10 @@ export function FilesPanel() {
                   {GROUP_LABEL[g]}
                 </div>
                 {grouped[g].map(f => (
-                  <button key={f.name} onClick={() => setSelected(f.name)}
+                  <button key={f.name}
+                    onClick={() => { setSelected(f.name); setSidebarOpen(false) }}
                     className={clsx(
-                      'w-full text-left px-3 py-2 text-xs transition-colors flex items-center gap-2',
+                      'w-full text-left px-3 py-2.5 sm:py-2 text-xs transition-colors flex items-center gap-2',
                       selected === f.name
                         ? 'bg-ink-800 text-white'
                         : 'hover:bg-ink-100 text-ink-700'
@@ -155,15 +160,37 @@ export function FilesPanel() {
       </div>
 
       {/* ── 右侧预览区 ── */}
-      <div className="flex-1 overflow-auto scrollbar-thin bg-ink-50">
+      <div className="flex-1 overflow-auto scrollbar-thin bg-ink-50 flex flex-col min-w-0">
+        {/* 文件列表切换条 */}
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-ink-200 bg-white shrink-0">
+          <button
+            onClick={() => setSidebarOpen(v => !v)}
+            title={sidebarOpen ? '隐藏文件列表' : '显示文件列表'}
+            className={clsx(
+              'flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-colors',
+              sidebarOpen
+                ? 'bg-ink-800 text-white border-ink-800'
+                : 'border-ink-300 text-ink-600 hover:bg-ink-100'
+            )}>
+            <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+              <path d="M2 4.75A.75.75 0 0 1 2.75 4h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 8a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8Zm0 3.25a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z" />
+            </svg>
+            {sidebarOpen ? '隐藏列表' : `文件列表${files.length > 0 ? ` (${files.length})` : ''}`}
+          </button>
+          {selected && (
+            <span className="text-xs text-ink-500 truncate">{selected}</span>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-auto">
         {!selected && (
-          <div className="h-full flex flex-col items-center justify-center text-ink-400 gap-2">
+          <div className="h-full flex flex-col items-center justify-center text-ink-400 gap-2 py-12">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2"
               className="w-12 h-12 opacity-20">
               <path strokeLinecap="round" strokeLinejoin="round"
                 d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z" />
             </svg>
-            <p className="text-xs">从左侧选择文件预览</p>
+            <p className="text-xs">点击「文件列表」选择文件</p>
           </div>
         )}
 
@@ -223,7 +250,8 @@ export function FilesPanel() {
             )}
           </div>
         )}
-      </div>
+        </div>{/* flex-1 overflow-auto */}
+      </div>{/* 右侧预览区 */}
     </div>
   )
 }

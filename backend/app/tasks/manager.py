@@ -86,6 +86,7 @@ class TaskManager:
                         task_id=r.task_id, user_id=r.user_id,
                         title=r.title, problem=r.problem,
                         data_files=json.loads(r.data_files or "[]"),
+                        image_files=json.loads(getattr(r, 'image_files', None) or "[]"),
                         state=state, phase=r.phase, error=r.error,
                         work_dir=r.work_dir,
                         created_at=r.created_at, updated_at=r.updated_at,
@@ -103,17 +104,21 @@ class TaskManager:
         pass
 
     # ---------- 创建 ----------
-    async def create(self, *, user_id: int, title: str, problem: str, data_files: list[str]) -> Task:
+    async def create(
+        self, *, user_id: int, title: str, problem: str,
+        data_files: list[str], image_files: list[str] | None = None,
+    ) -> Task:
         settings = get_settings()
         tid = uuid.uuid4().hex[:12]
-        # 按用户分区
         work_dir = settings.workspace_path / str(user_id) / tid
         work_dir.mkdir(parents=True, exist_ok=True)
 
         t = Task(
             task_id=tid, user_id=user_id,
             title=title, problem=problem,
-            data_files=data_files, work_dir=str(work_dir),
+            data_files=data_files,
+            image_files=image_files or [],
+            work_dir=str(work_dir),
         )
         self._tasks[tid] = t
         ev = asyncio.Event(); ev.set()
@@ -126,7 +131,9 @@ class TaskManager:
             rec = TaskRecord(
                 task_id=tid, user_id=user_id, title=title, problem=problem,
                 state=t.state.value, phase=t.phase, error="",
-                work_dir=t.work_dir, data_files=json.dumps(data_files),
+                work_dir=t.work_dir,
+                data_files=json.dumps(data_files),
+                image_files=json.dumps(image_files or []),
                 created_at=t.created_at, updated_at=t.updated_at,
             )
             s.add(rec)
@@ -141,6 +148,13 @@ class TaskManager:
         if not t:
             return
         t.data_files = files
+        await self._persist_task(t)
+
+    async def update_image_files(self, task_id: str, files: list[str]) -> None:
+        t = self._tasks.get(task_id)
+        if not t:
+            return
+        t.image_files = files
         await self._persist_task(t)
 
     # ---------- 状态机 ----------
@@ -343,6 +357,7 @@ class TaskManager:
                 rec.phase = t.phase
                 rec.error = t.error
                 rec.data_files = json.dumps(t.data_files)
+                rec.image_files = json.dumps(t.image_files)
                 rec.updated_at = t.updated_at
                 await s.commit()
         except Exception as e:

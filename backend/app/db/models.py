@@ -65,6 +65,7 @@ class TaskRecord(Base):
     error: Mapped[str] = mapped_column(Text, default="", nullable=False)
     work_dir: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     data_files: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    image_files: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     created_at: Mapped[float] = mapped_column(Float, default=_now, nullable=False, index=True)
     updated_at: Mapped[float] = mapped_column(Float, default=_now, nullable=False)
 

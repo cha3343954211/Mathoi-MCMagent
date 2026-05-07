@@ -51,6 +51,7 @@ async def init_db() -> None:
             "ALTER TABLE model_configs ADD COLUMN selected_preset_id INTEGER",
             "ALTER TABLE model_presets ADD COLUMN is_default BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE model_presets ADD COLUMN pro_only BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN image_files TEXT NOT NULL DEFAULT '[]'",
         ]:
             try:
                 await conn.exec_driver_sql(ddl)
