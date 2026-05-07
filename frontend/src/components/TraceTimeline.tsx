@@ -56,7 +56,13 @@ function LiveStatus({ events, current, streamingContent }: {
     if (current.state === 'completed') return '✓ 任务完成'
     if (current.state === 'failed')    return `✗ 失败：${current.error || ''}`
     if (current.state === 'paused')    return '⏸ 已暂停'
-    if (current.state === 'awaiting_hitl') return '⏸ 等待人工介入'
+    if (current.state === 'awaiting_hitl') {
+      const ctx = current.hitl_request?.context
+      if (ctx?.redo_round !== undefined) {
+        return `⏸ 建模方案（第 ${(ctx.redo_round as number) + 1} 稿）待审核`
+      }
+      return '⏸ 等待人工介入'
+    }
     if (streamingAgents.length > 0) return `${streamingAgents.join('/')} 输出中…`
     if (lastThinking) return `${lastThinking.agent} 思考中（第 ${lastThinking.payload?.step} 步）`
     if (lastVisible?.type === 'agent.tool_call')
