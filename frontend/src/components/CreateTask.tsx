@@ -61,8 +61,6 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
   const [showExamples, setShowExamples] = useState(false)
   const fileInputRef   = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
-  const FILE_INPUT_ID    = 'create-task-file-input'
-  const CAMERA_INPUT_ID  = 'create-task-camera-input'
   const { loadTasks, selectTask } = useStore()
 
   // 图片预览缓存
@@ -218,15 +216,24 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
               </label>
             </div>
 
-            {/* 隐藏的 file input（普通文件） */}
-            <input id={FILE_INPUT_ID} ref={fileInputRef} type="file" multiple
-              accept={FILE_ACCEPT} className="sr-only"
-              onChange={e => { addFiles(e.target.files); e.target.value = '' }} />
+            {/* 隐藏的 file input（普通文件）
+                不用 sr-only/hidden：部分移动端浏览器 clip/overflow:hidden 会阻止 file picker 弹出 */}
+            <input
+              ref={fileInputRef}
+              type="file" multiple
+              accept={FILE_ACCEPT}
+              className="absolute opacity-0 w-0 h-0 pointer-events-none"
+              onChange={e => { addFiles(e.target.files); e.target.value = '' }}
+            />
 
             {/* 隐藏的 camera input（移动端拍照） */}
-            <input id={CAMERA_INPUT_ID} ref={cameraInputRef} type="file"
-              accept="image/*" capture="environment" className="sr-only"
-              onChange={e => { addFiles(e.target.files); e.target.value = '' }} />
+            <input
+              ref={cameraInputRef}
+              type="file"
+              accept="image/*" capture="environment"
+              className="absolute opacity-0 w-0 h-0 pointer-events-none"
+              onChange={e => { addFiles(e.target.files); e.target.value = '' }}
+            />
 
             {/* 拖拽区（桌面） */}
             <div
@@ -295,22 +302,26 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
               </ul>
             )}
 
-            {/* 文件操作按钮行（所有设备均显示，移动端更显眼） */}
+            {/* 文件操作按钮行：使用 button + ref.click()，比 label htmlFor 在移动端更可靠 */}
             <div className="flex gap-2">
-              <label htmlFor={FILE_INPUT_ID}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
                 className="flex-1 flex items-center justify-center gap-1.5 py-3 sm:py-2
                            border border-ink-300 rounded-lg text-xs text-ink-600 bg-white
-                           hover:bg-ink-50 cursor-pointer transition-colors font-medium">
+                           hover:bg-ink-50 active:bg-ink-100 transition-colors font-medium">
                 <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 opacity-70">
                   <path d="M3 10a.75.75 0 0 1 .75-.75h4.5v-4.5a.75.75 0 0 1 1.5 0v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5A.75.75 0 0 1 3 10Z" />
                 </svg>
                 选择文件
-              </label>
-              {/* 拍照上传（移动端有效，桌面也可用） */}
-              <label htmlFor={CAMERA_INPUT_ID}
+              </button>
+              {/* 拍照上传 */}
+              <button
+                type="button"
+                onClick={() => cameraInputRef.current?.click()}
                 className="flex items-center justify-center gap-1.5 px-4 py-3 sm:py-2
                            border border-ink-300 rounded-lg text-xs text-ink-600 bg-white
-                           hover:bg-ink-50 cursor-pointer transition-colors">
+                           hover:bg-ink-50 active:bg-ink-100 transition-colors">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"
                   className="w-4 h-4">
                   <path strokeLinecap="round" strokeLinejoin="round"
@@ -325,7 +336,7 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
                 </svg>
                 <span className="hidden sm:inline">拍照</span>
                 <span className="sm:hidden">拍照上传</span>
-              </label>
+              </button>
             </div>
           </div>
 
