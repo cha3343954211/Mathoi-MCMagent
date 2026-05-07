@@ -9,11 +9,13 @@ import clsx from 'clsx'
 
 // ---- 颜色映射 ----
 const AGENT_BADGE: Record<string, string> = {
+  coordinator: 'bg-pink-100 text-pink-700 border-pink-200',
   modeler: 'bg-purple-100 text-purple-700 border-purple-200',
   coder:   'bg-blue-100 text-blue-700 border-blue-200',
   writer:  'bg-emerald-100 text-emerald-700 border-emerald-200',
 }
 const AGENT_BORDER: Record<string, string> = {
+  coordinator: 'border-l-pink-400',
   modeler: 'border-l-purple-400',
   coder:   'border-l-blue-400',
   writer:  'border-l-emerald-400',
