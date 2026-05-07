@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from ..agents import CoderAgent, CoordinatorAgent, ModelerAgent, WriterAgent
+from ..agents.modeler import parse_modeler_sections
 from ..agents.prompts import (
     CODER_EDA_PROMPT,
     CODER_SENSITIVITY_PROMPT,
@@ -79,41 +80,79 @@ async def run_workflow(task_id: str) -> None:
             await task_manager.checkpoint(task_id, "coordinator_done", {"ques_count": ques_count})
             await emit(EventType.PHASE_EXIT, task_id, phase="coordinator")
 
-            # ── Phase 1: Modeler（建模方案）──────────────────────────────
-            await task_manager.wait_if_paused(task_id)  # 届间检查点
+            # ── Phase 1: Modeler（建模方案 + HITL 人工审核）────────────
+            await task_manager.wait_if_paused(task_id)
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="modeler")
             await emit(EventType.PHASE_ENTER, task_id, phase="modeler")
 
-            modeler_input = (
-                f"# 题目结构化信息\n```json\n{json.dumps(questions, ensure_ascii=False, indent=2)}\n```\n\n"
-                f"# 工作区数据文件\n{data_summary}\n\n"
-                f"题目共 {ques_count} 个问题，请为每个问题制定详细建模方案，"
-                "并包含 EDA 分析方案和敏感性分析方案。"
-            )
-            modeler = ModelerAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=3)
-            _patch_agent_with_hitl(modeler, task_id)
-            modeling_plan = await modeler.run(modeler_input)
-            (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
+            def _build_modeler_input(extra_feedback: str = "") -> str:
+                base = (
+                    f"# 题目结构化信息\n"
+                    f"```json\n{json.dumps(questions, ensure_ascii=False, indent=2)}\n```\n\n"
+                    f"# 工作区数据文件\n{data_summary}\n\n"
+                    f"题目共 {ques_count} 个问题，请为每个问题制定详细建模方案，"
+                    "并包含 EDA 数据分析方案和敏感性分析方案。"
+                )
+                if extra_feedback:
+                    base += f"\n\n# 用户反馈（请据此修改方案）\n{extra_feedback}"
+                return base
 
-            # 解析 Modeler 结构化 JSON，提取各阶段专属方案
+            modeling_plan = ""
             solutions: dict = {}
-            try:
-                solutions = json.loads(modeling_plan)
-                if not isinstance(solutions, dict):
-                    solutions = {}
-            except (json.JSONDecodeError, ValueError):
-                solutions = {}   # 兜底：将使用全文作为通用方案
+            _MAX_REDO = 2   # 最多允许重做 2 次
+            for _redo_round in range(_MAX_REDO + 1):
+                modeler = ModelerAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=3)
+                _patch_agent_with_hitl(modeler, task_id)
+                feedback_text = modeling_plan if _redo_round > 0 else ""
+                modeling_plan = await modeler.run(_build_modeler_input(feedback_text))
+                plan_path = work_dir / "modeling_plan.md"
+                plan_path.write_text(modeling_plan, encoding="utf-8")
+                solutions = parse_modeler_sections(modeling_plan)
+
+                # HITL：暂停让用户审核方案
+                hitl_ctx = {
+                    "plan": modeling_plan,
+                    "plan_preview": modeling_plan[:4000],
+                    "sections": list(solutions.keys()),
+                    "ques_count": ques_count,
+                    "redo_round": _redo_round,
+                    "max_redo": _MAX_REDO,
+                }
+                hitl_resp = await task_manager.request_hitl(
+                    task_id,
+                    f"建模方案已生成（第{_redo_round + 1}稿）。请审核后选择操作：",
+                    hitl_ctx,
+                )
+                action = hitl_resp.get("action", "approve")
+
+                if action == "approve":
+                    # 直接通过
+                    break
+                elif action == "edit" and hitl_resp.get("edited_plan", "").strip():
+                    # 用户手动编辑后通过
+                    modeling_plan = hitl_resp["edited_plan"].strip()
+                    plan_path.write_text(modeling_plan, encoding="utf-8")
+                    solutions = parse_modeler_sections(modeling_plan)
+                    break
+                elif action == "redo" and _redo_round < _MAX_REDO:
+                    # 重做：把用户反馈拼入下一轮 input
+                    feedback_text = hitl_resp.get("feedback", "")
+                    modeling_plan = feedback_text   # 传给下轮的占位
+                    logger.info("Modeler redo round {} with feedback: {}", _redo_round + 1, feedback_text[:80])
+                    continue
+                else:
+                    # redo 超限或未知 action，直接通过
+                    break
 
             def _solution_ctx(key: str) -> str:
                 """提取指定 key 的建模方案，不存在时降级到全文。"""
-                plan = solutions.get(key, "")
-                if plan:
-                    return f"# 建模方案（{key}）\n{plan}\n\n"
-                # 兜底：全文
-                return f"# 建模方案\n{modeling_plan}\n\n"
+                raw_plan = solutions.get(key, "") or solutions.get("_raw", "")
+                if raw_plan:
+                    return f"# 建模方案（{key}）\n{raw_plan}\n\n"
+                return f"# 建模方案（全文）\n{modeling_plan}\n\n"
 
             data_ctx = f"# 工作区数据文件\n{data_summary}\n\n"
-            await task_manager.checkpoint(task_id, "modeler_done", {"keys": list(solutions.keys())})
+            await task_manager.checkpoint(task_id, "modeler_done", {"sections": list(solutions.keys())})
             await emit(EventType.PHASE_EXIT, task_id, phase="modeler")
             # ── Phase 2: Coder（分流执行）────────────────────────────────
             await task_manager.wait_if_paused(task_id)  # 届间检查点
