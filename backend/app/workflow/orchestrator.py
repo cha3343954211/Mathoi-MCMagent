@@ -237,8 +237,10 @@ async def run_workflow(task_id: str) -> None:
                 await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
                 await task_manager.wait_if_paused(task_id)  # 届间检查点
 
-            # 逐问写作
+            # 逐问写作（章节序号从 6 起，基于前5个固定章节）
+            BASE_SECTION = 6  # 一问题重述 二问题分析 三假设 四符号 五EDA → 六开始是各问
             for qi in range(1, ques_count + 1):
+                sec_no = BASE_SECTION + qi - 1
                 phase_name = f"writer:q{qi}"
                 await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
                 ques_figs = [e for e in figure_catalog if e.get("question") == qi]
@@ -246,9 +248,11 @@ async def run_workflow(task_id: str) -> None:
                 ques_result = ""
                 rp = work_dir / f"result_q{qi}.md"
                 if rp.exists():
-                    ques_result = rp.read_text(encoding="utf-8")
+                    raw = rp.read_text(encoding="utf-8")
+                    ques_result = raw[:_REPORT_MAX_CHARS] + "\n…（已截断）" if len(raw) > _REPORT_MAX_CHARS else raw
+                sec_roman = ["六","七","八","九","十"][sec_no - 6] if sec_no - 6 < 5 else str(sec_no)
                 q_sec_prompt = "\n".join([
-                    f"撰写论文【问题{qi}：建模与求解】章节，保存到 `sec_q{qi}.md`。",
+                    f"撰写论文【{sec_roman}、问题{qi}：建模与求解】章节，保存到 `sec_q{qi}.md`。",
                     "",
                     f"### 问题描述",
                     questions.get(f"ques{qi}", ""),
@@ -257,20 +261,21 @@ async def run_workflow(task_id: str) -> None:
                     ques_result or "（无报告，依据建模方案推断）",
                     "",
                     f"### 本问图表目录（必须全部插入正文，一张不得遗漏）",
-                    ques_catalog,
+                    ques_catalog or "（本问暂无生成图表，以文字描述结果）",
                     "",
                     "### 写作要求（必须全部满足）",
                     f"1. 正文不少于 800 字实质内容（不含图表标注）；",
-                    f"2. 严格按以下结构输出：",
-                    f"   `## 问题{qi}：[自拟标题]`",
-                    f"   `### {qi}.1 问题分析与建模思路`（150-200字：难点分析、方法选择理由、与备选方法对比）",
-                    f"   `### {qi}.2 模型建立`（完整数学公式推导：变量定义→目标函数→约束条件）",
-                    f"   `### {qi}.3 求解过程`（算法步骤、迭代逻辑、关键参数设置）",
-                    f"   `### {qi}.4 结果分析`（逐项引用 Coder 报告数值，插入全部图表）",
-                    f"   `### {qi}.5 本问小结`（50-80字，归纳核心结论）",
+                    f"2. 严格按以下结构输出（章节标题格式照抄）：",
+                    f"   `## {sec_roman}、问题{qi}：[依据结果自拟子标题]`",
+                    f"   `### {sec_no}.1 问题分析与建模思路`（150-200字：难点分析、方法选择理由、与备选方法对比）",
+                    f"   `### {sec_no}.2 模型建立`（完整数学公式推导：变量定义→目标函数→约束条件→参数来源三选一：数据统计/文献/交叉验证）",
+                    f"   `### {sec_no}.3 求解过程`（算法步骤、迭代逻辑、关键参数设置，说明参数来源）",
+                    f"   `### {sec_no}.4 结果分析`（逐项引用 Coder 报告数值，插入全部图表）",
+                    f"   `### {sec_no}.5 本问小结`（50-80字，归纳核心结论，不得使用列举，必须段落式）",
                     f"3. 每个模型公式独立成行 `$$...$$`，变量首次出现时用 `$...$` 定义含义；",
-                    f"4. 每张图前2-3句分析铺垫，图后1-2句结论，图表标注严格用规定格式；",
-                    f"5. 所有数值来自 Coder 报告，精确到4位有效数字，不得编造。",
+                    f"4. 每张图前2-3句分析铺垫（结合具体数值），图后2句结论，格式：![caption](filename)\n**图N：caption**；",
+                    f"5. 所有数值来自 Coder 报告，精确到4位有效数字，严禁编造；",
+                    f"6. 全文禁止 bullet 列举，必须段落式叙述。",
                 ])
                 try:
                     w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
@@ -363,8 +368,11 @@ def _describe_data(work_dir: Path, files: list[str]) -> str:
     return "\n".join(lines)
 
 
+_REPORT_MAX_CHARS = 10_000  # 单个 Coder 报告截断阈值，防 context 溢出
+
+
 def _collect_coder_reports(work_dir: Path, ques_count: int) -> str:
-    """收集 Coder 各阶段产出的报告文件，合并为字符串。"""
+    """收集 Coder 各阶段产出的报告文件，合并为字符串（单文件超限时截断）。"""
     parts: list[str] = []
     report_files = (
         ["eda_report.md"]
@@ -375,6 +383,8 @@ def _collect_coder_reports(work_dir: Path, ques_count: int) -> str:
         p = work_dir / fname
         if p.exists():
             content = p.read_text(encoding="utf-8")
+            if len(content) > _REPORT_MAX_CHARS:
+                content = content[:_REPORT_MAX_CHARS] + "\n…（报告过长已截断）"
             parts.append(f"### {fname}\n{content}")
     return "\n\n".join(parts) if parts else "（暂无 Coder 报告）"
 
@@ -419,7 +429,13 @@ def _format_catalog_for_writer(catalog: list[dict]) -> str:
         return "（本次运行未生成图片）"
     lines = []
     for e in catalog:
-        qstr = f"[问题{e['question']}]" if e["question"] else ""
+        q = e["question"]
+        if q == 0:
+            qstr = "[EDA]"
+        elif q == -1:
+            qstr = "[敏感性]"
+        else:
+            qstr = f"[问题{q}]"
         desc = f" — {e['desc']}" if e.get("desc") else ""
         lines.append(
             f"- 图{e['index']} {qstr} `{e['file']}` caption=\"{e['caption']}\"{desc}"
