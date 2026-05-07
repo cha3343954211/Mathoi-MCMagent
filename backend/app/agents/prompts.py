@@ -165,15 +165,21 @@ for chunk in pd.read_csv("big.csv", chunksize=100_000, dtype={"id": "int32"}, lo
 
 ### 图表风格强制约束（每张图必须遵守）
 
-**❶ 绝对禁止手动设置字体 rcParams！**
-内核已自动探测并注入可用 CJK 字体（包括中文支持）。手动修改会破坏全局配置：
+**❶ 绝对禁止任何字体操作！**
+内核启动时已通过四重策略自动探测并全局注入 CJK 字体，中文可直接使用。
+手动设置字体会覆盖全局配置，导致方框乱码：
 ```python
-# ✗ 错误 — 会导致中文乱码或覆盖全局字体
+# ✗ 以下全部禁止
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['font.family'] = 'serif'
+matplotlib.rc('font', family='Microsoft YaHei')
+from matplotlib.font_manager import FontProperties; fp = FontProperties(family='SimHei')
+import matplotlib; matplotlib.rcParams.update({'font.family': 'sans-serif'})
 
-# ✓ 正确 — 直接使用，无需设置
-ax.set_xlabel('时间（年）')  # 中文自动正常渲染
+# ✓ 正确 — 直接写中文，无需任何字体设置
+ax.set_xlabel('时间（年）')
+ax.set_title('预测结果对比')
+ax.legend(['实际值', '预测值'])
 ```
 
 **❷ 颜色必须来自 PALETTE/COLORS，禁止硬编码颜色字符串：**
