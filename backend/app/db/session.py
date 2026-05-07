@@ -11,11 +11,38 @@ from .models import Base, User, UserRole
 
 _settings = get_settings()
 
-_engine = create_async_engine(_settings.database_url, echo=False, future=True)
+def _sqlite_connect_args() -> dict:
+    """仅 SQLite 需要特殊连接参数。"""
+    if "sqlite" in _settings.database_url:
+        return {"check_same_thread": False, "timeout": 30}
+    return {}
+
+_engine = create_async_engine(
+    _settings.database_url,
+    echo=False,
+    future=True,
+    connect_args=_sqlite_connect_args(),
+)
 AsyncSessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
 
 
+async def _enable_wal() -> None:
+    """SQLite 开启 WAL 日志模式，大幅提升并发写性能，防止 database is locked。"""
+    if "sqlite" not in _settings.database_url:
+        return
+    try:
+        async with _engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+            await conn.exec_driver_sql("PRAGMA busy_timeout=10000")
+            await conn.exec_driver_sql("PRAGMA cache_size=-32000")  # 32 MB
+        logger.info("SQLite WAL mode enabled")
+    except Exception as e:
+        logger.warning("WAL setup failed (non-fatal): {}", e)
+
+
 async def init_db() -> None:
+    await _enable_wal()
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # 列迁移：为旧库补充新列（SQLite 不支持 IF NOT EXISTS，忽略异常）

@@ -72,7 +72,11 @@ class Event:
 
 
 class EventBus:
-    """进程内异步事件总线 + DB 持久化历史回放。"""
+    """进程内异步事件总线 + DB 持久化历史回放。
+    
+    DB 写入采用批量队列（每 500ms 或满 50 条刷一次），
+    彻底消除 per-event fire-and-forget 并发写竞争。
+    """
 
     def __init__(self) -> None:
         self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
@@ -81,9 +85,76 @@ class EventBus:
         # 已从 DB 加载过的 task_id 集合（避免重复查询）
         self._db_loaded: set[str] = set()
         self._lock = asyncio.Lock()
+        # 批量写入队列
+        self._write_queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=8192)
+        self._flush_task: asyncio.Task | None = None
 
     # 不写入 DB / 不进历史的事件类型（仅推送给当前活跃订阅者）
     _NO_PERSIST = frozenset({EventType.AGENT_STREAM_CHUNK})
+
+    def start_flush_worker(self) -> None:
+        """在事件循环启动后调用，启动后台批量刷写任务。"""
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_worker())
+
+    async def _flush_worker(self) -> None:
+        """后台任务：每 500ms 或满 50 条，批量写入 DB。"""
+        _BATCH_SIZE = 50
+        _INTERVAL   = 0.5
+        pending: list[Event] = []
+        while True:
+            try:
+                deadline = asyncio.get_event_loop().time() + _INTERVAL
+                while len(pending) < _BATCH_SIZE:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        ev = await asyncio.wait_for(self._write_queue.get(), timeout=remaining)
+                        pending.append(ev)
+                    except asyncio.TimeoutError:
+                        break
+                if pending:
+                    await self._batch_save(pending)
+                    pending = []
+            except asyncio.CancelledError:
+                # 退出前最后一次刷写
+                if pending:
+                    await self._batch_save(pending)
+                return
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _batch_save(events: list[Event]) -> None:
+        """批量 INSERT，单个事务，性能远优于逐条 INSERT。"""
+        try:
+            from ..db import AsyncSessionLocal, EventRecord
+            from sqlalchemy import select as sa_select
+            async with AsyncSessionLocal() as s:
+                # 先查已存在的 event_id（去重）
+                ids = [e.event_id for e in events]
+                existing = set(
+                    (await s.execute(
+                        sa_select(EventRecord.event_id).where(EventRecord.event_id.in_(ids))
+                    )).scalars().all()
+                )
+                new_recs = [
+                    EventRecord(
+                        event_id=e.event_id,
+                        task_id=e.task_id,
+                        type=e.type.value,
+                        agent=e.agent,
+                        payload=json.dumps(e.payload, default=str),
+                        timestamp=e.timestamp,
+                    )
+                    for e in events if e.event_id not in existing
+                ]
+                if new_recs:
+                    s.add_all(new_recs)
+                    await s.commit()
+        except Exception:
+            pass  # 持久化失败不影响主流程
 
     _MAX_HISTORY_PER_TASK = 2000   # 每任务最多保留事件数
     _TRIM_TO = 1500                # 超限后裁剪至此数量
@@ -102,33 +173,17 @@ class EventBus:
                 q.put_nowait(event)
             except asyncio.QueueFull:
                 pass
-        # 持久化（fire-and-forget，不阻塞主流程）
+        # 持久化：入队列由后台批量写入（不再逐条 create_task）
         if event.type not in self._NO_PERSIST:
-            asyncio.create_task(self._save_to_db(event))
+            try:
+                self._write_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass  # 队列满时丢弃（罕见）
 
-    # ---- DB 写入 --------------------------------------------------------
+    # _save_to_db 已由 _batch_save 替代，保留空实现兼容旧引用
     @staticmethod
-    async def _save_to_db(event: Event) -> None:
-        try:
-            from ..db import AsyncSessionLocal, EventRecord
-            from sqlalchemy import select as sa_select
-            async with AsyncSessionLocal() as s:
-                # 幂等：已存在则跳过
-                exists = (await s.execute(
-                    sa_select(EventRecord.id).where(EventRecord.event_id == event.event_id)
-                )).scalar_one_or_none()
-                if exists is None:
-                    s.add(EventRecord(
-                        event_id=event.event_id,
-                        task_id=event.task_id,
-                        type=event.type.value,
-                        agent=event.agent,
-                        payload=json.dumps(event.payload, default=str),
-                        timestamp=event.timestamp,
-                    ))
-                    await s.commit()
-        except Exception:
-            pass  # 持久化失败不影响主流程
+    async def _save_to_db(event: Event) -> None:  # noqa: unused
+        pass
 
     # ---- DB 加载 --------------------------------------------------------
     async def _load_from_db(self, task_id: str) -> None:

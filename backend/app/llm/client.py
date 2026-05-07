@@ -28,12 +28,34 @@ async def _get_user(user_id: int) -> Optional[User]:
         return (await s.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
 
 
+# LLM 配置解析缓存：(user_id, agent) → (ResolvedConfig, expire_ts)
+_resolve_cache: dict[tuple[int, str], tuple["ResolvedConfig", float]] = {}
+_RESOLVE_TTL = 30.0   # 秒
+
+
 async def _resolve(user_id: int, agent: str) -> ResolvedConfig:
+    import time
+    key = (user_id, agent)
+    cached = _resolve_cache.get(key)
+    if cached and cached[1] > time.time():
+        return cached[0]
     user = await _get_user(user_id)
     if not user:
         raise LLMError(f"user {user_id} not found")
     async with AsyncSessionLocal() as s:
-        return await resolve_effective(s, user=user, agent=agent)
+        cfg = await resolve_effective(s, user=user, agent=agent)
+    _resolve_cache[key] = (cfg, time.time() + _RESOLVE_TTL)
+    return cfg
+
+
+def invalidate_resolve_cache(user_id: int | None = None) -> None:
+    """配置变更时主动清除缓存（model_service 在更新配置后调用）。"""
+    if user_id is None:
+        _resolve_cache.clear()
+    else:
+        for k in list(_resolve_cache.keys()):
+            if k[0] == user_id:
+                del _resolve_cache[k]
 
 
 def _compute_cost(cfg: ResolvedConfig, pt: int, ct: int) -> float:

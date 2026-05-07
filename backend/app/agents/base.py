@@ -1,7 +1,6 @@
 """BaseAgent：统一的 LLM + 工具循环。每次调用自动按用户配置解析并计量。"""
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Optional
 
@@ -9,9 +8,6 @@ from ..core.events import EventType, emit
 from ..core.logging import logger
 from ..llm import ChatMessage, ContentPart, chat_for_user
 from ..tools import ToolRegistry
-
-_LLM_MAX_RETRIES = 3       # LLM 调用失败最大重试次数
-_LLM_RETRY_DELAY = 2.0     # 基础退避秒数（指数：×1, ×2, ×4）
 
 
 class BaseAgent:
@@ -56,23 +52,14 @@ class BaseAgent:
         logger.debug("Agent {} history trimmed to {} msgs", self.name, len(self.history))
 
     async def _chat_with_retry(self, tool_specs) -> ChatMessage:
-        """带指数退避重试的 LLM 调用。"""
-        last_exc: Exception = RuntimeError("unknown")
-        for attempt in range(1, _LLM_MAX_RETRIES + 1):
-            try:
-                return await chat_for_user(
-                    user_id=self.user_id,
-                    agent=self.name,
-                    messages=self.history,
-                    task_id=self.task_id,
-                    tools=tool_specs,
-                )
-            except Exception as e:
-                last_exc = e
-                logger.warning("LLM call attempt {}/{} failed: {}", attempt, _LLM_MAX_RETRIES, e)
-                if attempt < _LLM_MAX_RETRIES:
-                    await asyncio.sleep(_LLM_RETRY_DELAY * (2 ** (attempt - 1)))
-        raise last_exc
+        """LLM 调用（tenacity 内部已处理重试，这里不再叠加）。"""
+        return await chat_for_user(
+            user_id=self.user_id,
+            agent=self.name,
+            messages=self.history,
+            task_id=self.task_id,
+            tools=tool_specs,
+        )
 
     async def run(
         self,

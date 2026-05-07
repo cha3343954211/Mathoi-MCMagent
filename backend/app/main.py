@@ -14,6 +14,7 @@ from .api import router as api_router
 from .api.admin import router as admin_router
 from .auth import auth_router
 from .core.config import get_settings
+from .core.events import bus as event_bus
 from .core.logging import logger, setup_logging
 from .db import init_db
 from .tasks import task_manager
@@ -33,7 +34,16 @@ async def lifespan(app: FastAPI):
     )
     await init_db()
     await task_manager.init()
+    event_bus.start_flush_worker()          # 启动事件批量写入后台任务
     yield
+    # 关闭：停止 flush worker（最终刷写剩余事件）
+    if event_bus._flush_task and not event_bus._flush_task.done():
+        event_bus._flush_task.cancel()
+        try:
+            import asyncio
+            await asyncio.wait_for(event_bus._flush_task, timeout=3.0)
+        except Exception:
+            pass
     await task_manager.close()
     logger.info("MathoiAgent stopped")
 

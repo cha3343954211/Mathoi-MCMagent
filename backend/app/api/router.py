@@ -282,11 +282,18 @@ async def retry(task_id: str, user: User = Depends(get_current_user)) -> dict[st
     t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
     if t.state not in (TaskState.FAILED, TaskState.CANCELLED):
         raise HTTPException(400, f"任务当前状态 {t.state.value} 不可重试（仅 failed/cancelled 可重试）")
-    # 取消旧 handle（若残留）
-    await task_manager.cancel(task_id)
-    # 重置状态
+    # 只取消 asyncio handle，不发 TASK_CANCELLED 事件（避免前端状态闪烁）
+    old_handle = task_manager._task_handles.get(task_id)
+    if old_handle and not old_handle.done():
+        old_handle.cancel()
+    # 重置 pause_event（避免新工作流在旧 pause 状态下卡住）
+    ev = task_manager._pause_events.get(task_id)
+    if ev:
+        ev.set()
+    # 直接重置状态（不走 cancel()，不发 CANCELLED 事件）
     t.error = ""
-    await task_manager.update_state(task_id, TaskState.PENDING, error="", phase="")
+    t.phase = ""
+    await task_manager.update_state(task_id, TaskState.PENDING)
     # 重启工作流
     handle = asyncio.create_task(run_workflow(task_id))
     task_manager.attach_handle(task_id, handle)
