@@ -69,10 +69,20 @@ export function FilesPanel() {
     if (!current) return
     api.files(current.task_id).then(r => {
       setFiles(r.files)
-      const hasPaper = r.files.some(f => f.name === 'paper.md')
-      if (current.task_id !== prevTaskId.current || (!selected && hasPaper)) {
+      const names = new Set(r.files.map(f => f.name))
+      const hasPaper = names.has('paper.md')
+      const hasPlan  = names.has('modeling_plan.md')
+      const isHITL   = current.state === 'awaiting_hitl'
+
+      // 新任务或无已选文件时，智能选择默认文件
+      const isNewTask = current.task_id !== prevTaskId.current
+      if (isNewTask || !selected) {
         prevTaskId.current = current.task_id
-        setSelected(hasPaper ? 'paper.md' : null)
+        // HITL 等待中优先展示建模方案；有论文时优先论文；否则不选
+        const autoSelect = isHITL && hasPlan ? 'modeling_plan.md'
+          : hasPaper ? 'paper.md'
+          : null
+        setSelected(autoSelect)
         setContent('')
       }
     })
