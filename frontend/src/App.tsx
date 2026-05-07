@@ -100,12 +100,13 @@ export default function App() {
 
       {/* ======== 侧边栏 ======== */}
       <aside className={clsx(
-        'bg-white border-r border-ink-200 flex flex-col transition-all duration-200 ease-in-out overflow-hidden',
-        // 桌面：正常流布局
-        'relative hidden sm:flex',
+        'bg-white border-r border-ink-200 flex-col transition-all duration-200 ease-in-out overflow-hidden',
+        // 移动端：fixed 抽屉（z-40 > 遮罩 z-30）
+        'fixed inset-y-0 left-0 z-40 w-72',
+        // 桌面：回到正常文档流，宽度响应 collapsed
+        'sm:relative sm:inset-y-auto sm:left-auto',
         collapsed ? 'sm:w-12' : 'sm:w-72',
-        // 移动端：绝对定位抽屉，z-40 覆盖這罩
-        'sm:!flex fixed sm:static inset-y-0 left-0 z-40 w-72',
+        // 显隐：移动端由 mobileOpen 决定；桌面始终显示
         mobileOpen ? 'flex' : 'hidden sm:flex'
       )}>
 
