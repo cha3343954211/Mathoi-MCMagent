@@ -167,46 +167,90 @@ for chunk in pd.read_csv("big.csv", chunksize=100_000, dtype={"id": "int32"}, lo
 
 ## 可视化规范（学术论文标准）
 
-### 全局配置（每个新内核已自动配置，无需重复设置）
+### 预注入全局常量（内核启动时已配置，直接调用）
+
 ```python
-# 以下配置已在内核启动时注入，直接使用即可
-# COLORS = {'primary':'#2E5B88','secondary':'#E85D4C','tertiary':'#4A9B7F','neutral':'#7F7F7F'}
-# FIG_SINGLE=(5,4) FIG_DOUBLE=(10,4) FIG_WIDE=(8,3) FIG_SQUARE=(6,6)
+# ── 配色（所有图表统一，禁止自定义其他颜色）──────────────
+# COLORS = {'primary':'#2E5B88', 'secondary':'#E85D4C', 'tertiary':'#4A9B7F',
+#            'warning':'#F0A500', 'neutral':'#6B6B6B', 'light':'#B8D4E8'}
+# PALETTE  = [COLORS['primary'], COLORS['secondary'], ...]  # 6色列表
+
+# ── 图幅（按内容类型选择，禁止随意设 figsize）────────────
+# FIG_SINGLE = (6, 4.5)   单图
+# FIG_DOUBLE = (11, 4.5)  左右两图
+# FIG_WIDE   = (9, 3.5)   宽条形图
+# FIG_SQUARE = (6, 6)     热力图/散点图
+# FIG_TALL   = (5, 7)     竖向多子图
+
+# ── 便捷函数 ─────────────────────────────────────────────
+# fig, ax = std_fig(FIG_SINGLE)   # 创建标准图幅
+# save_fig('fig_q1_result.png')   # 保存并关闭（自动 dpi=300）
 ```
 
-若需自定义图，**务必**在代码开头：
+### 图表风格强制约束（每张图必须遵守）
+
+**❶ 绝对禁止手动设置字体 rcParams！**
+内核已自动探测并注入可用 CJK 字体（包括中文支持）。手动修改会破坏全局配置：
 ```python
-plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'SimHei', 'Microsoft YaHei', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
+# ✗ 错误 — 会导致中文乱码或覆盖全局字体
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['font.family'] = 'serif'
+
+# ✓ 正确 — 直接使用，无需设置
+ax.set_xlabel('时间（年）')  # 中文自动正常渲染
+```
+
+**❷ 颜色必须来自 PALETTE/COLORS，禁止硬编码颜色字符串：**
+```python
+# ✗ 错误
+ax.plot(x, y, color='blue')
+ax.bar(cats, vals, color=['red','green','yellow'])
+
+# ✓ 正确
+ax.plot(x, y, color=COLORS['primary'])
+ax.bar(cats, vals, color=PALETTE[:len(cats)])
+# 多系列时 matplotlib 会自动按 PALETTE 循环，无需手动指定颜色
+```
+
+**❸ 图幅使用预定义常量，禁止随意 figsize：**
+```python
+# ✓ 正确
+fig, ax = std_fig(FIG_SINGLE)      # 推荐：用 std_fig
+fig, axes = plt.subplots(1, 2, figsize=FIG_DOUBLE)  # 多子图时
+```
+
+**❹ 保存统一用 save_fig()，禁止 plt.show()：**
+```python
+save_fig('fig_q1_trend.png')       # 自动 dpi=300, bbox_inches=tight
+# 等价于（不推荐手写）：
+plt.savefig('fig_q1_trend.png', dpi=300, bbox_inches='tight', facecolor='white')
+plt.close('all')
 ```
 
 ### 图表类型选择
 | 数据类型 | 推荐图表 |
 |---------|---------|
-| 趋势/时序 | 折线图 + 置信带（fill_between） |
-| 分布比较 | 箱线图 / 小提琴图 |
-| 相关性 | 散点图 + 回归线 + r 值标注 |
-| 分类对比 | 水平条形图 |
+| 趋势/时序 | 折线图 + `fill_between` 置信带 |
+| 分布比较 | 箱线图 / 小提琴图（`sns.boxplot/violinplot`）|
+| 相关性矩阵 | 热力图（`sns.heatmap`，`FIG_SQUARE`）|
+| 单变量分布 | 直方图 + KDE（`sns.histplot(kde=True)`）|
+| 分类对比 | 水平条形图（`barh`，避免竖向挤标签）|
 | 参数敏感性 | 热力图 / 等高线 / 带阴影折线 |
+| 散点关系 | 散点 + 回归线 + r/p 值文本标注 |
 
 ### 严格禁止
-- 3D 图表（除非展示真 3D 数据）
+- `plt.show()`（无头服务器环境）
+- 3D 图表（视觉混乱，用热力图/等高线代替）
 - 饼图（改用水平条形图）
-- `ax.set_title()` 图内标题（用论文 caption，不要在图内写标题）
-- 密集网格线 / 四边完整边框（只保留左+下）
-- `plt.show()`（服务器无显示环境）
+- 图内用 `ax.set_title()` 写标题（标题留给论文 caption）
+- 在图中写大量英文注释（论文用中文）
+- 手动修改任何字体 / 颜色 / 线宽 rcParams
 
-### 图表命名规范（严格遵守）
+### 图表命名规范（严格遵守，Writer 按此关联章节）
 - EDA 图：`fig_eda_{描述}.png`
-- 各问图：`fig_q{N}_{描述}.png`
-- 多图：`fig_q{N}_{01}_{描述}.png`
-- 敏感性图：`fig_sens_{描述}.png`
-
-保存统一用：
-```python
-plt.savefig('fig_xxx.png', dpi=300, bbox_inches='tight')
-plt.close()
-```
+- 各问图：`fig_q{N}_{描述}.png`（N 为问题编号）
+- 多图序列：`fig_q{N}_{01}_{描述}.png`
+- 敏感性图：`fig_sens_{参数名}.png`
 
 ---
 
