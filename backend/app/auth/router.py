@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import time
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,9 +20,24 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ---------- Schemas ----------
 class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_\-]+$")
-    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=64)
+    email: Optional[str] = Field(default=None, max_length=255)
     password: str = Field(..., min_length=6, max_length=128)
+
+    @field_validator('username')
+    @classmethod
+    def username_chars(cls, v: str) -> str:
+        import re
+        if not re.match(r'^[\w\u4e00-\u9fff\-\.@]+$', v):
+            raise ValueError('用户名包含非法字符')
+        return v
+
+    @field_validator('email')
+    @classmethod
+    def email_basic(cls, v: Optional[str]) -> Optional[str]:
+        if v and '@' not in v:
+            raise ValueError('邮箱格式无效')
+        return v
 
 
 class LoginRequest(BaseModel):
@@ -66,18 +83,24 @@ async def register(body: RegisterRequest, session: AsyncSession = Depends(get_se
     if not s.allow_register:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "公开注册已关闭，请联系管理员")
 
+    from sqlalchemy import or_
+    conditions = [User.username == body.username]
+    if body.email:
+        conditions.append(User.email == body.email)
     exists = (await session.execute(
-        select(User).where((User.username == body.username) | (User.email == body.email))
+        select(User).where(or_(*conditions))
     )).scalar_one_or_none()
     if exists:
-        raise HTTPException(status.HTTP_409_CONFLICT, "用户名或邮箱已被使用")
+        detail = "用户名已被使用" if exists.username == body.username else "邮箱已被使用"
+        raise HTTPException(status.HTTP_409_CONFLICT, detail)
 
     u = User(
         username=body.username,
-        email=body.email,
+        email=body.email or f"{body.username}@noreply.local",
         hashed_password=hash_password(body.password),
         role=UserRole.USER.value,
         is_active=True,
+        use_default_model=True,
         last_login=time.time(),
     )
     session.add(u)

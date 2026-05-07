@@ -331,7 +331,7 @@ async def run_workflow(task_id: str) -> None:
                 logger.warning("docx export failed: {}", e)
 
             await emit(EventType.PHASE_EXIT, task_id, phase="writer")
-            await task_manager.update_state(task_id, TaskState.COMPLETED, phase="done")
+            await task_manager.update_state(task_id, TaskState.COMPLETED)
             await emit(EventType.TASK_COMPLETED, task_id)
 
     except asyncio.CancelledError:

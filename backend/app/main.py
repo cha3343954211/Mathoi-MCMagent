@@ -4,10 +4,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncio
+import time
+
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import router as api_router
@@ -51,13 +54,26 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="MathoiAgent", version="0.2.0", lifespan=lifespan)
+    origins = settings.cors_origin_list
+    # "*" 通配符时不能同时开 credentials（浏览器安全限制）
+    wildcard = origins == ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origin_list,
-        allow_credentials=True,
+        allow_origins=origins,
+        allow_credentials=not wildcard,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
+    # 全局未捕获异常：返回 JSON 而不是 500 HTML 页面
+    @app.exception_handler(Exception)
+    async def _global_exc_handler(request: Request, exc: Exception):
+        logger.exception("Unhandled exception on {}: {}", request.url.path, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "服务器内部错误，请稍后重试"},
+        )
+
     # 路由注册顺序：auth -> admin -> 业务
     app.include_router(auth_router, prefix="/api")
     app.include_router(admin_router, prefix="/api")

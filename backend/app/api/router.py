@@ -22,8 +22,25 @@ from ..services.model_service import (
 )
 from ..services.usage_service import stats_for_task
 from ..tasks import TaskState, task_manager
+from ..core.config import get_settings
 from ..workflow import run_workflow
 from .schemas import TaskResponse
+
+
+async def _run_workflow_with_timeout(task_id: str) -> None:
+    """run_workflow 超时包装：超出 max_task_hours 则将任务标为 FAILED。"""
+    from ..core.events import EventType, emit as emit_event
+    settings = get_settings()
+    timeout_secs = settings.max_task_hours * 3600
+    try:
+        await asyncio.wait_for(run_workflow(task_id), timeout=timeout_secs)
+    except asyncio.TimeoutError:
+        logger.error("workflow timeout after {:.1f}h | task={}", settings.max_task_hours, task_id)
+        await task_manager.update_state(
+            task_id, TaskState.FAILED,
+            error=f"任务超时（>{settings.max_task_hours}小时）",
+        )
+        await emit_event(EventType.TASK_FAILED, task_id, error="任务超时")
 
 router = APIRouter()
 
@@ -233,7 +250,7 @@ async def create_task(
     t.image_files = img_saved
     await task_manager.update_data_files(t.task_id, data_saved)
 
-    handle = asyncio.create_task(run_workflow(t.task_id))
+    handle = asyncio.create_task(_run_workflow_with_timeout(t.task_id))
     task_manager.attach_handle(t.task_id, handle)
     return _to_response(t)
 
@@ -295,7 +312,7 @@ async def retry(task_id: str, user: User = Depends(get_current_user)) -> dict[st
     t.phase = ""
     await task_manager.update_state(task_id, TaskState.PENDING)
     # 重启工作流
-    handle = asyncio.create_task(run_workflow(task_id))
+    handle = asyncio.create_task(_run_workflow_with_timeout(task_id))
     task_manager.attach_handle(task_id, handle)
     return {"ok": True}
 

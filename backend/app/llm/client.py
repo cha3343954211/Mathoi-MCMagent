@@ -31,6 +31,7 @@ async def _get_user(user_id: int) -> Optional[User]:
 # LLM 配置解析缓存：(user_id, agent) → (ResolvedConfig, expire_ts)
 _resolve_cache: dict[tuple[int, str], tuple["ResolvedConfig", float]] = {}
 _RESOLVE_TTL = 30.0   # 秒
+_MAX_RESOLVE_CACHE = 200   # 防止内存漏海
 
 
 async def _resolve(user_id: int, agent: str) -> ResolvedConfig:
@@ -44,7 +45,17 @@ async def _resolve(user_id: int, agent: str) -> ResolvedConfig:
         raise LLMError(f"user {user_id} not found")
     async with AsyncSessionLocal() as s:
         cfg = await resolve_effective(s, user=user, agent=agent)
-    _resolve_cache[key] = (cfg, time.time() + _RESOLVE_TTL)
+    now = time.time()
+    _resolve_cache[key] = (cfg, now + _RESOLVE_TTL)
+    # 超限则先清过期条目，再淘汰最早的
+    if len(_resolve_cache) > _MAX_RESOLVE_CACHE:
+        expired = [k for k, v in _resolve_cache.items() if v[1] <= now]
+        for k in expired:
+            del _resolve_cache[k]
+        if len(_resolve_cache) > _MAX_RESOLVE_CACHE:
+            oldest = sorted(_resolve_cache, key=lambda k: _resolve_cache[k][1])
+            for k in oldest[: len(_resolve_cache) - _MAX_RESOLVE_CACHE]:
+                del _resolve_cache[k]
     return cfg
 
 
@@ -103,7 +114,7 @@ async def chat_for_user(
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        reraise=False,
+        reraise=True,   # 耗尽重试后真正抛出异常
     ):
         with attempt:
             try:

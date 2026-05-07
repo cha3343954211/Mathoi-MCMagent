@@ -56,6 +56,12 @@ class Task:
         self.updated_at = time.time()
 
 
+_TERMINAL_STATES = frozenset({
+    TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED
+})
+_MAX_TASKS_IN_MEMORY = 500      # 超限时淘汰最老的已完结任务
+
+
 class TaskManager:
     def __init__(self) -> None:
         self._tasks: dict[str, Task] = {}
@@ -126,6 +132,7 @@ class TaskManager:
             await s.commit()
 
         await emit(EventType.TASK_CREATED, tid, title=title)
+        self._maybe_evict()
         return t
 
     async def update_data_files(self, task_id: str, files: list[str]) -> None:
@@ -145,6 +152,9 @@ class TaskManager:
             t.error = error
         if phase:
             t.phase = phase
+        # 终态自动清空 phase，避免前端状态栏残留
+        if state in _TERMINAL_STATES:
+            t.phase = ""
         t.touch()
         await self._persist_task(t)
 
@@ -287,6 +297,20 @@ class TaskManager:
 
     def attach_handle(self, task_id: str, handle: asyncio.Task) -> None:
         self._task_handles[task_id] = handle
+
+    def _maybe_evict(self) -> None:
+        """内存任务数超限时，淘汰最老的已完结任务，防止内存无限增长。"""
+        if len(self._tasks) <= _MAX_TASKS_IN_MEMORY:
+            return
+        evictable = sorted(
+            [t for t in self._tasks.values() if t.state in _TERMINAL_STATES],
+            key=lambda x: x.updated_at,
+        )
+        for t in evictable[: len(self._tasks) - _MAX_TASKS_IN_MEMORY]:
+            self._tasks.pop(t.task_id, None)
+            self._pause_events.pop(t.task_id, None)
+            self._hitl_events.pop(t.task_id, None)
+            logger.debug("Evicted task {} from memory", t.task_id)
 
     # ---------- 持久化 ----------
     async def _persist_task(self, t: Task) -> None:

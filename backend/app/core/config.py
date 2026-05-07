@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     # 工作流
     max_coder_iterations: int = 8
     max_revision_rounds: int = 2
+    max_task_hours: float = 6.0   # 单任务最长运行时间（小时），超时强制 FAILED
 
     # ---------- 派生方法 ----------
     @property

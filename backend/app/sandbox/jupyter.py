@@ -14,11 +14,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+import re as _re
+
 from jupyter_client.manager import AsyncKernelManager
 
 from ..core.config import get_settings
 from ..core.events import EventType, emit
 from ..core.logging import logger
+
+# 清理 ANSI 转义码（traceback 中 colorama 输出会干扰 LLM 理解）
+_ANSI_RE = _re.compile(r"\x1b\[[0-9;]*[mGKHF]")
 
 
 @dataclass
@@ -175,20 +180,29 @@ class JupyterSandbox:
         await self.stop()
 
     async def _silent_exec(self, code: str) -> None:
-        """内部预热执行，不发事件。"""
-        assert self._kc is not None
-        msg_id = self._kc.execute(code)
-        while True:
-            try:
-                msg = await asyncio.wait_for(self._kc.get_iopub_msg(), timeout=10)
-            except asyncio.TimeoutError:
-                break
-            if (
-                msg.get("parent_header", {}).get("msg_id") == msg_id
-                and msg.get("msg_type") == "status"
-                and msg["content"].get("execution_state") == "idle"
-            ):
-                break
+        """内部预热执行，不发事件。预热失败只记 warning，不中断启动。"""
+        if self._kc is None:
+            return
+        try:
+            msg_id = self._kc.execute(code)
+            deadline = asyncio.get_running_loop().time() + 30
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    logger.warning("sandbox warmup timeout | task={}", self.task_id)
+                    break
+                try:
+                    msg = await asyncio.wait_for(self._kc.get_iopub_msg(), timeout=min(remaining, 10))
+                except asyncio.TimeoutError:
+                    break
+                if (
+                    msg.get("parent_header", {}).get("msg_id") == msg_id
+                    and msg.get("msg_type") == "status"
+                    and msg["content"].get("execution_state") == "idle"
+                ):
+                    break
+        except Exception as e:
+            logger.warning("sandbox warmup error (non-fatal): {} | task={}", e, self.task_id)
 
     async def execute(self, code: str, *, timeout: Optional[int] = None, emit_events: bool = True) -> ExecResult:
         """执行一段代码，返回结构化结果。执行前检测内核存活，崩溃则自动重启。"""
@@ -196,11 +210,12 @@ class JupyterSandbox:
             # 检测内核是否还活着，死亡则重启
             if self._km is not None:
                 try:
-                    alive = await self._km.is_alive()
+                    # 加 5s 超时：ZMQ socket 活性检查有时卡死
+                    alive = await asyncio.wait_for(self._km.is_alive(), timeout=5.0)
                     if not alive:
                         logger.warning("Kernel not alive before execute, restarting | task={}", self.task_id)
                         await self._restart_kernel()
-                except Exception as e:
+                except (asyncio.TimeoutError, Exception) as e:
                     logger.warning("Kernel liveness check failed ({}), restarting | task={}", e, self.task_id)
                     await self._restart_kernel()
             return await self._execute_impl(code, timeout=timeout, emit_events=emit_events)
@@ -267,8 +282,11 @@ class JupyterSandbox:
 
             elif mtype == "error":
                 result.success = False
-                result.error = content.get("ename", "") + ": " + content.get("evalue", "")
-                result.traceback = content.get("traceback", [])
+                raw_err = content.get("ename", "") + ": " + content.get("evalue", "")
+                raw_tb = content.get("traceback", [])
+                # 清理 ANSI 转义码，避免 LLM 收到乱码
+                result.error = _ANSI_RE.sub("", raw_err)
+                result.traceback = [_ANSI_RE.sub("", line) for line in raw_tb]
                 if emit_events:
                     await emit(
                         EventType.SANDBOX_STDERR,
