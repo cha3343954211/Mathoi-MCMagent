@@ -66,32 +66,30 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
   // 图片预览缓存
   const [previews, setPreviews] = useState<Record<string, string>>({})
 
-  const updatePreviews = (newFiles: File[]) => {
-    const keep: Record<string, string> = {}
-    newFiles.forEach(f => {
-      if (isImageFile(f.name)) {
-        keep[f.name] = previews[f.name] || URL.createObjectURL(f)
-      }
-    })
-    Object.entries(previews).forEach(([n, u]) => { if (!keep[n]) URL.revokeObjectURL(u) })
-    setPreviews(keep)
-  }
-
   // 累加文件（去重：同名新文件替换旧文件）
+  // ⚠️ 不在 setFiles 回调内调用 setPreviews，避免 React setState 嵌套副作用
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return
+    const incomingArr = Array.from(incoming)
     setFiles(prev => {
       const map = new Map(prev.map(f => [f.name, f]))
-      Array.from(incoming).forEach(f => map.set(f.name, f))
-      const next = Array.from(map.values())
-      updatePreviews(next)
+      incomingArr.forEach(f => map.set(f.name, f))
+      return Array.from(map.values())
+    })
+    setPreviews(prev => {
+      const next = { ...prev }
+      incomingArr.forEach(f => {
+        if (isImageFile(f.name) && !next[f.name]) {
+          next[f.name] = URL.createObjectURL(f)
+        }
+      })
       return next
     })
   }
 
   const removeFile = (name: string) => {
     if (previews[name]) URL.revokeObjectURL(previews[name])
-    setPreviews(prev => { const p = {...prev}; delete p[name]; return p })
+    setPreviews(prev => { const p = { ...prev }; delete p[name]; return p })
     setFiles(prev => prev.filter(f => f.name !== name))
   }
 
@@ -216,22 +214,28 @@ export function CreateTask({ onClose }: { onClose: () => void }) {
               </label>
             </div>
 
-            {/* 隐藏的 file input（普通文件）
-                不用 sr-only/hidden：部分移动端浏览器 clip/overflow:hidden 会阻止 file picker 弹出 */}
+            {/* 隐藏 file input：fixed 定位移出视口 + 1px 尺寸
+                - 不用 w-0/h-0：零尺寸时部分 iOS/Android 浏览器不弹 file picker
+                - 不用 pointer-events-none：某些浏览器检查此属性判断元素可交互性
+                - fixed 脱离 overflow:auto 祖先，避免 iOS 下 scroll 容器拦截 */}
             <input
               ref={fileInputRef}
               type="file" multiple
               accept={FILE_ACCEPT}
-              className="absolute opacity-0 w-0 h-0 pointer-events-none"
+              className="fixed opacity-0 w-px h-px -top-40 -left-40"
+              tabIndex={-1}
+              aria-hidden
               onChange={e => { addFiles(e.target.files); e.target.value = '' }}
             />
 
-            {/* 隐藏的 camera input（移动端拍照） */}
+            {/* 拍照 input */}
             <input
               ref={cameraInputRef}
               type="file"
               accept="image/*" capture="environment"
-              className="absolute opacity-0 w-0 h-0 pointer-events-none"
+              className="fixed opacity-0 w-px h-px -top-40 -left-40"
+              tabIndex={-1}
+              aria-hidden
               onChange={e => { addFiles(e.target.files); e.target.value = '' }}
             />
 
