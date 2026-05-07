@@ -24,6 +24,7 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleting, setDeleting]      = useState(false)
   const [collapsed, setCollapsed]    = useState(false)
+  const [mobileOpen, setMobileOpen]   = useState(false)  // 移动端抽屉
   const [interruptMsg, setInterruptMsg] = useState('')
   const [runSecs, setRunSecs]         = useState(0)
 
@@ -43,6 +44,9 @@ export default function App() {
     if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
     return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
   }
+
+  // 切换任务后自动关闭移动端抽屉
+  useEffect(() => { setMobileOpen(false) }, [current?.task_id])
 
   useEffect(() => { bootstrap() }, [])
 
@@ -85,10 +89,23 @@ export default function App() {
 
   return (
     <div className="h-full flex">
+      {/* ======== 移动端遗罩层 ======== */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 z-30 sm:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
       {/* ======== 侧边栏 ======== */}
       <aside className={clsx(
         'bg-white border-r border-ink-200 flex flex-col transition-all duration-200 ease-in-out overflow-hidden',
-        collapsed ? 'w-12' : 'w-72'
+        // 桌面：正常流布局
+        'relative hidden sm:flex',
+        collapsed ? 'sm:w-12' : 'sm:w-72',
+        // 移动端：绝对定位抽屉，z-40 覆盖這罩
+        'sm:!flex fixed sm:static inset-y-0 left-0 z-40 w-72',
+        mobileOpen ? 'flex' : 'hidden sm:flex'
       )}>
 
         {collapsed ? (
@@ -130,8 +147,10 @@ export default function App() {
                 <IconBtn onClick={() => setShowModels(true)} title="模型配置">
                   <GearIcon />
                 </IconBtn>
-                {/* 收起按钮 */}
-                <IconBtn onClick={() => setCollapsed(true)} title="收起侧边栏">
+                {/* 移动端：关闭抽屉；桌面：收起侧边栏 */}
+                <IconBtn
+                  onClick={() => { setCollapsed(true); setMobileOpen(false) }}
+                  title="收起侧边栏">
                   <SidebarCloseIcon />
                 </IconBtn>
               </div>
@@ -184,6 +203,25 @@ export default function App() {
 
       {/* ======== 主内容 ======== */}
       <main className="flex-1 flex flex-col bg-white min-w-0">
+        {/* 移动端顶部 header（桌面隐藏） */}
+        <div className="sm:hidden flex items-center gap-3 px-4 py-2.5 border-b border-ink-200 bg-white shrink-0 sticky top-0 z-10">
+          <button
+            onClick={() => setMobileOpen(true)}
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-ink-600 hover:bg-ink-100"
+            aria-label="打开侧边栏">
+            <svg viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 10a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm0 5.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <h1 className="text-sm font-semibold tracking-tight flex-1 truncate">
+            {current ? current.title : 'MathoiAgent'}
+          </h1>
+          <button onClick={() => setShowCreate(true)}
+            className="w-9 h-9 flex items-center justify-center rounded-lg bg-ink-800 text-white text-lg leading-none">
+            +
+          </button>
+        </div>
+
         {!current ? (
           <Empty onNew={() => setShowCreate(true)} />
         ) : (
