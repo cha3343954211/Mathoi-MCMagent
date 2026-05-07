@@ -86,24 +86,46 @@ class CoordinatorAgent:
 
 
 def _parse_json(text: str) -> dict | None:
-    """尝试从 LLM 输出中提取 JSON 对象。"""
+    """多策略修复并解析 LLM 输出的 JSON。"""
     # 去除 markdown 代码块
     text = re.sub(r"```json\s*", "", text)
     text = re.sub(r"```\s*", "", text)
     text = text.strip()
 
-    # 直接解析
+    # 策略1：直接解析
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # 提取第一个 {...} 块
+    # 策略2：提取第一个 {...} 块再解析
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(0))
         except json.JSONDecodeError:
             pass
+
+    # 策略3：修复字符串值内未转义的换行/引号后重试
+    try:
+        fixed = re.sub(
+            r'(?<=: ")(.*?)(?=",\s*\n\s*"|"\s*\n\s*})',
+            lambda m2: m2.group(0).replace('"', '\\"').replace('\n', '\\n'),
+            text, flags=re.DOTALL,
+        )
+        return json.loads(fixed)
+    except Exception:
+        pass
+
+    # 策略4：正则暴力提取 "key": "value" 对（最后兜底）
+    try:
+        pairs = re.findall(r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        int_pairs = re.findall(r'"(\w+)"\s*:\s*(\d+)', text)
+        if pairs or int_pairs:
+            result: dict = {k: v for k, v in pairs}
+            result.update({k: int(v) for k, v in int_pairs})
+            return result if result else None
+    except Exception:
+        pass
 
     return None

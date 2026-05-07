@@ -225,8 +225,16 @@ export function TraceTimeline() {
     setAutoScroll(atBottom)
   }
 
-  const ctrl = (fn: () => Promise<any>) => async () => { try { await fn() } catch {} }
+  const [ctrlBusy, setCtrlBusy] = useState<string | null>(null)
   const { refreshCurrent } = useStore()
+
+  const ctrlClick = (key: string, fn: () => Promise<any>) => async () => {
+    if (ctrlBusy) return
+    setCtrlBusy(key)
+    try { await fn() } catch {}
+    // 主动刷新，不完全依赖 WS 事件
+    setTimeout(() => { refreshCurrent(); setCtrlBusy(null) }, 350)
+  }
 
   return (
     <div className="h-full flex flex-col">
@@ -257,16 +265,20 @@ export function TraceTimeline() {
           <div className="flex gap-1.5 text-xs">
             {/* 暂停：仅运行中时显示 */}
             {current.state === 'running' && (
-              <button onClick={ctrl(() => api.pause(current.task_id))}
-                className="px-2 py-1 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded border border-yellow-200">
-                ⏸ 暂停
+              <button
+                disabled={ctrlBusy === 'pause'}
+                onClick={ctrlClick('pause', () => api.pause(current.task_id))}
+                className="px-2 py-1 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded border border-yellow-200 disabled:opacity-50">
+                {ctrlBusy === 'pause' ? '…' : '⏸ 暂停'}
               </button>
             )}
             {/* 继续：仅暂停中时显示 */}
             {current.state === 'paused' && (
-              <button onClick={ctrl(() => api.resume(current.task_id))}
-                className="px-2 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded border border-emerald-200">
-                ▶ 继续
+              <button
+                disabled={ctrlBusy === 'resume'}
+                onClick={ctrlClick('resume', () => api.resume(current.task_id))}
+                className="px-2 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded border border-emerald-200 disabled:opacity-50">
+                {ctrlBusy === 'resume' ? '…' : '▶ 继续'}
               </button>
             )}
             {/* 取消：仅活跃状态 */}

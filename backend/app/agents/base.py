@@ -1,6 +1,7 @@
 """BaseAgent：统一的 LLM + 工具循环。每次调用自动按用户配置解析并计量。"""
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
@@ -9,10 +10,14 @@ from ..core.logging import logger
 from ..llm import ChatMessage, ContentPart, chat_for_user
 from ..tools import ToolRegistry
 
+_LLM_MAX_RETRIES = 3       # LLM 调用失败最大重试次数
+_LLM_RETRY_DELAY = 2.0     # 基础退避秒数（指数：×1, ×2, ×4）
+
 
 class BaseAgent:
     name: str = "base"
     system_prompt: str = ""
+    max_memory: int = 40   # 保留最近 N 条消息（含 system），防 context 超限
 
     def __init__(
         self,
@@ -32,6 +37,43 @@ class BaseAgent:
     async def wait_if_paused(self) -> None:
         pass
 
+    def _trim_history(self) -> None:
+        """滑窗压缩：超过 max_memory 时保留 system 消息 + 最近 (max_memory-1) 条。
+        tool 调用对必须整体保留，避免破坏 assistant/tool 配对导致 API 报错。"""
+        if len(self.history) <= self.max_memory:
+            return
+        system_msgs = [m for m in self.history if m.role == "system"]
+        non_system = [m for m in self.history if m.role != "system"]
+        keep = non_system[-(self.max_memory - len(system_msgs)):]
+        # 若 keep 第一条是 tool 消息，往前多保留直到找到对应 assistant 调用
+        while keep and keep[0].role == "tool":
+            idx = len(non_system) - len(keep) - 1
+            if idx >= 0:
+                keep = [non_system[idx]] + keep
+            else:
+                break
+        self.history = system_msgs + keep
+        logger.debug("Agent {} history trimmed to {} msgs", self.name, len(self.history))
+
+    async def _chat_with_retry(self, tool_specs) -> ChatMessage:
+        """带指数退避重试的 LLM 调用。"""
+        last_exc: Exception = RuntimeError("unknown")
+        for attempt in range(1, _LLM_MAX_RETRIES + 1):
+            try:
+                return await chat_for_user(
+                    user_id=self.user_id,
+                    agent=self.name,
+                    messages=self.history,
+                    task_id=self.task_id,
+                    tools=tool_specs,
+                )
+            except Exception as e:
+                last_exc = e
+                logger.warning("LLM call attempt {}/{} failed: {}", attempt, _LLM_MAX_RETRIES, e)
+                if attempt < _LLM_MAX_RETRIES:
+                    await asyncio.sleep(_LLM_RETRY_DELAY * (2 ** (attempt - 1)))
+        raise last_exc
+
     async def run(
         self,
         user_input: str,
@@ -48,17 +90,12 @@ class BaseAgent:
             await self.wait_if_paused()
             await emit(EventType.AGENT_THINKING, self.task_id, agent=self.name, step=step + 1)
 
+            self._trim_history()
             tool_specs = self.tools.specs() if self.tools else None
             try:
-                msg = await chat_for_user(
-                    user_id=self.user_id,
-                    agent=self.name,
-                    messages=self.history,
-                    task_id=self.task_id,
-                    tools=tool_specs,
-                )
+                msg = await self._chat_with_retry(tool_specs)
             except Exception as e:
-                logger.exception("LLM error")
+                logger.exception("LLM error after retries")
                 await emit(EventType.AGENT_MESSAGE, self.task_id, agent=self.name,
                            role="assistant", content=f"[LLM error] {e}")
                 raise

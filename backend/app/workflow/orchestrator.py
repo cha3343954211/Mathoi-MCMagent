@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -94,23 +95,6 @@ async def run_workflow(task_id: str) -> None:
             (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
             await task_manager.checkpoint(task_id, "modeler_done", {"plan": modeling_plan[:500]})
             await emit(EventType.PHASE_EXIT, task_id, phase="modeler")
-            await task_manager.wait_if_paused(task_id)  # 届间检查点
-
-            # HITL：审查建模方案
-            hitl = await task_manager.request_hitl(
-                task_id,
-                prompt="请审查建模方案，可直接通过 / 修改后通过 / 让 Modeler 重做。",
-                context={"plan_preview": modeling_plan[:2000]},
-            )
-            action = (hitl or {}).get("action", "approve")
-            if action == "edit":
-                modeling_plan = hitl.get("edited_plan", modeling_plan)
-                (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
-            elif action == "redo":
-                feedback = hitl.get("feedback", "请重新优化")
-                modeling_plan = await modeler.run(f"用户反馈：{feedback}\n请重新输出完整建模方案。")
-                (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
-
             # ── Phase 2: Coder（分流执行）────────────────────────────────
             await task_manager.wait_if_paused(task_id)  # 届间检查点
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="coder")
@@ -129,8 +113,11 @@ async def run_workflow(task_id: str) -> None:
             coder_eda = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                    max_iterations=settings.max_coder_iterations)
             _patch_agent_with_hitl(coder_eda, task_id)
-            eda_out = await coder_eda.run(common_ctx + CODER_EDA_PROMPT)
-            coder_stdout_log.append(_extract_figure_features(eda_out, label="EDA"))
+            try:
+                eda_out = await coder_eda.run(common_ctx + CODER_EDA_PROMPT)
+                coder_stdout_log.append(_extract_figure_features(eda_out, label="EDA"))
+            except Exception as _e:
+                logger.warning("coder:eda failed (non-fatal): {}", _e)
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:eda")
 
             # 2b: 逐问求解
@@ -154,8 +141,11 @@ async def run_workflow(task_id: str) -> None:
                     f"图表命名：`fig_q{qi}_*.png`。\n"
                     f"最后用 `write_file` 保存 `result_q{qi}.md`（含关键数值结论），再回复 `TASK_COMPLETE`。"
                 )
-                q_out = await coder_q.run(q_prompt)
-                coder_stdout_log.append(_extract_figure_features(q_out, label=f"问题{qi}"))
+                try:
+                    q_out = await coder_q.run(q_prompt)
+                    coder_stdout_log.append(_extract_figure_features(q_out, label=f"问题{qi}"))
+                except Exception as _e:
+                    logger.warning("coder:q{} failed (non-fatal): {}", qi, _e)
                 await emit(EventType.PHASE_EXIT, task_id, phase=f"coder:q{qi}")
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
@@ -164,8 +154,11 @@ async def run_workflow(task_id: str) -> None:
             coder_sens = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                     max_iterations=settings.max_coder_iterations)
             _patch_agent_with_hitl(coder_sens, task_id)
-            sens_out = await coder_sens.run(common_ctx + CODER_SENSITIVITY_PROMPT)
-            coder_stdout_log.append(_extract_figure_features(sens_out, label="敏感性分析"))
+            try:
+                sens_out = await coder_sens.run(common_ctx + CODER_SENSITIVITY_PROMPT)
+                coder_stdout_log.append(_extract_figure_features(sens_out, label="敏感性分析"))
+            except Exception as _e:
+                logger.warning("coder:sensitivity failed (non-fatal): {}", _e)
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:sensitivity")
 
             await task_manager.checkpoint(task_id, "coder_done", {})
