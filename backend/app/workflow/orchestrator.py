@@ -93,34 +93,48 @@ async def run_workflow(task_id: str) -> None:
             _patch_agent_with_hitl(modeler, task_id)
             modeling_plan = await modeler.run(modeler_input)
             (work_dir / "modeling_plan.md").write_text(modeling_plan, encoding="utf-8")
-            await task_manager.checkpoint(task_id, "modeler_done", {"plan": modeling_plan[:500]})
+
+            # 解析 Modeler 结构化 JSON，提取各阶段专属方案
+            solutions: dict = {}
+            try:
+                solutions = json.loads(modeling_plan)
+                if not isinstance(solutions, dict):
+                    solutions = {}
+            except (json.JSONDecodeError, ValueError):
+                solutions = {}   # 兜底：将使用全文作为通用方案
+
+            def _solution_ctx(key: str) -> str:
+                """提取指定 key 的建模方案，不存在时降级到全文。"""
+                plan = solutions.get(key, "")
+                if plan:
+                    return f"# 建模方案（{key}）\n{plan}\n\n"
+                # 兜底：全文
+                return f"# 建模方案\n{modeling_plan}\n\n"
+
+            data_ctx = f"# 工作区数据文件\n{data_summary}\n\n"
+            await task_manager.checkpoint(task_id, "modeler_done", {"keys": list(solutions.keys())})
             await emit(EventType.PHASE_EXIT, task_id, phase="modeler")
             # ── Phase 2: Coder（分流执行）────────────────────────────────
             await task_manager.wait_if_paused(task_id)  # 届间检查点
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="coder")
             await emit(EventType.PHASE_ENTER, task_id, phase="coder")
 
-            common_ctx = (
-                f"# 建模方案\n{modeling_plan}\n\n"
-                f"# 工作区数据文件\n{data_summary}\n\n"
-            )
-
             # stdout 收集：记录各 Coder 阶段的图表数据特征输出
             coder_stdout_log: list[str] = []
 
-            # 2a: EDA
+            # 2a: EDA（只传 eda 方案）
             await emit(EventType.PHASE_ENTER, task_id, phase="coder:eda")
             coder_eda = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                    max_iterations=settings.max_coder_iterations)
             _patch_agent_with_hitl(coder_eda, task_id)
             try:
-                eda_out = await coder_eda.run(common_ctx + CODER_EDA_PROMPT)
+                eda_out = await coder_eda.run(_solution_ctx("eda") + data_ctx + CODER_EDA_PROMPT)
                 coder_stdout_log.append(_extract_figure_features(eda_out, label="EDA"))
             except Exception as _e:
                 logger.warning("coder:eda failed (non-fatal): {}", _e)
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:eda")
 
-            # 2b: 逐问求解
+            # 2b: 逐问求解（只传对应问题的方案）
             await task_manager.wait_if_paused(task_id)  # 届间检查点
             for qi in range(1, ques_count + 1):
                 ques_key = f"ques{qi}"
@@ -134,10 +148,10 @@ async def run_workflow(task_id: str) -> None:
                 if eda_p.exists():
                     eda_ctx = f"\n# EDA 分析报告\n{eda_p.read_text(encoding='utf-8')[:8000]}\n"
                 q_prompt = (
-                    common_ctx + eda_ctx +
+                    _solution_ctx(ques_key) + data_ctx + eda_ctx +
                     f"## 当前任务：求解问题 {qi}\n\n"
                     f"问题描述：{ques_text}\n\n"
-                    f"参考建模方案中关于「问题{qi}」的方案，完整实现求解、可视化并保存结果。\n"
+                    f"完整实现求解、可视化并保存结果。\n"
                     f"图表命名：`fig_q{qi}_*.png`。\n"
                     f"最后用 `write_file` 保存 `result_q{qi}.md`（含关键数值结论），再回复 `TASK_COMPLETE`。"
                 )
@@ -149,13 +163,15 @@ async def run_workflow(task_id: str) -> None:
                 await emit(EventType.PHASE_EXIT, task_id, phase=f"coder:q{qi}")
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
-            # 2c: 敏感性分析
+            # 2c: 敏感性分析（只传 sensitivity_analysis 方案）
             await emit(EventType.PHASE_ENTER, task_id, phase="coder:sensitivity")
             coder_sens = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                     max_iterations=settings.max_coder_iterations)
             _patch_agent_with_hitl(coder_sens, task_id)
             try:
-                sens_out = await coder_sens.run(common_ctx + CODER_SENSITIVITY_PROMPT)
+                sens_out = await coder_sens.run(
+                    _solution_ctx("sensitivity_analysis") + data_ctx + CODER_SENSITIVITY_PROMPT
+                )
                 coder_stdout_log.append(_extract_figure_features(sens_out, label="敏感性分析"))
             except Exception as _e:
                 logger.warning("coder:sensitivity failed (non-fatal): {}", _e)
