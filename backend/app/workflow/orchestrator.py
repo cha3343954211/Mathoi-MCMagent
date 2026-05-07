@@ -29,7 +29,7 @@ from ..exporters import export_paper
 from ..sandbox import JupyterSandbox
 from ..llm import image_part_from_file
 from ..tasks import TaskState, task_manager
-from ..tools import build_default_registry
+from ..tools import build_default_registry, build_writer_registry
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
 _MULTIMODAL_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -256,11 +256,16 @@ async def run_workflow(task_id: str) -> None:
                     p.write_text(content, encoding="utf-8")
                 return p.read_text(encoding="utf-8")
 
+            writer_tools = build_writer_registry(
+                work_dir, openalex_email=settings.openalex_email
+            )
+
             async def _write_section(phase: str, prompt: str, sec_file: str) -> str:
                 await emit(EventType.PHASE_ENTER, task_id, phase=phase)
                 result = ""
                 try:
-                    w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                    w = WriterAgent(task_id=task_id, user_id=uid,
+                                   tools=writer_tools, max_iterations=6)
                     _patch_agent_with_hitl(w, task_id)
                     output = await w.run(base_ctx + prompt)
                     result = _save_section(sec_file, output)

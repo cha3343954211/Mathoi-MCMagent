@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     max_revision_rounds: int = 2
     max_task_hours: float = 6.0   # 单任务最长运行时间（小时），超时强制 FAILED
 
+    # OpenAlex 学术搜索（Writer 引用文献用）
+    openalex_email: str = ""   # polite pool 必填，空则跳过文献搜索
+
     # ---------- 派生方法 ----------
     @property
     def cors_origin_list(self) -> list[str]:
