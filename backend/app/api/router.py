@@ -96,21 +96,46 @@ class ValidateKeyRequest(BaseModel):
     model: str
     api_key: str
     base_url: Optional[str] = None
+    backend: str = "openai"   # 'openai'（含兼容接口）或 'litellm'
 
 
-async def _do_model_test(model: str, api_key: str, base_url: Optional[str]) -> dict[str, Any]:
-    """公共连通性测试逻辑：发送最小 LLM 请求，返回 {valid, message}。"""
+async def _do_model_test(
+    model: str,
+    api_key: str,
+    base_url: Optional[str],
+    backend: str = "openai",
+) -> dict[str, Any]:
+    """连通性测试：与 llm/client.py 推理路径保持一致。
+
+    - backend='openai'（默认）：使用 AsyncOpenAI 客户端，支持自定义 base_url
+    - backend='litellm'：使用 litellm.acompletion，适用于 Claude/Gemini/Azure 等
+    """
     try:
-        import litellm
-        params: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": "Hi"}],
-            "max_tokens": 1,
-            "api_key": api_key,
-        }
-        if base_url:
-            params["api_base"] = base_url
-        await litellm.acompletion(**params)
+        if backend == "litellm":
+            import litellm
+            params: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+            }
+            if base_url:
+                params["api_base"] = base_url
+            if api_key:
+                params["api_key"] = api_key
+            await litellm.acompletion(**params)
+        else:
+            # openai backend：直接用 AsyncOpenAI，支持 DeepSeek / 硅基 / 任何 OpenAI 兼容接口
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(
+                api_key=api_key or "placeholder",
+                base_url=base_url or None,
+                timeout=30.0,
+            )
+            await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=1,
+            )
         return {"valid": True, "message": "✓ 连接成功"}
     except Exception as e:
         err = str(e)
@@ -122,10 +147,10 @@ async def _do_model_test(model: str, api_key: str, base_url: Optional[str]) -> d
             msg = "✗ 请求过于频繁，请稍后再试"
         elif "403" in err or "Forbidden" in err:
             msg = "✗ 权限不足或余额不足"
-        elif "connect" in err.lower() or "timeout" in err.lower():
+        elif "connect" in err.lower() or "timeout" in err.lower() or "network" in err.lower():
             msg = "✗ 无法连接到接口，请检查 Base URL"
         else:
-            msg = f"✗ 验证失败: {err[:80]}"
+            msg = f"✗ 验证失败: {err[:120]}"
         return {"valid": False, "message": msg}
 
 
@@ -135,7 +160,7 @@ async def validate_api_key(
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """发送一条测试请求，验证 API Key / Base URL / 模型 ID 是否可用。"""
-    return await _do_model_test(body.model, body.api_key, body.base_url)
+    return await _do_model_test(body.model, body.api_key, body.base_url, body.backend)
 
 
 @router.post("/models/presets/{preset_id}/test")
@@ -149,7 +174,8 @@ async def test_preset_connectivity(
     if p is None:
         raise HTTPException(404, "预设不存在或已停用")
     api_key = decrypt(p.api_key_enc) if p.api_key_enc else ""
-    return await _do_model_test(p.model, api_key, p.base_url or None)
+    backend = p.backend or "openai"
+    return await _do_model_test(p.model, api_key, p.base_url or None, backend)
 
 
 class UserModelUpdate(BaseModel):

@@ -249,9 +249,9 @@ export const api = {
     }),
   updateMyModel: (body: Partial<AgentCfg> & { agent: string; api_key?: string }) =>
     request<any>('/api/models/mine', { method: 'POST', body: JSON.stringify(body) }),
-  validateApiKey: (model: string, api_key: string, base_url?: string) =>
+  validateApiKey: (model: string, api_key: string, base_url?: string, backend = 'openai') =>
     request<{ valid: boolean; message: string }>('/api/models/validate', {
-      method: 'POST', body: JSON.stringify({ model, api_key, base_url })
+      method: 'POST', body: JSON.stringify({ model, api_key, base_url, backend })
     }),
 
   // 预设连通性测试（服务端用存储密钥，无需前端传 key）

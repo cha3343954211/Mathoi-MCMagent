@@ -96,7 +96,9 @@ interface AgentFormProps {
 // ================================================================
 // ValidateKeyBtn —— 实时验证 API Key 可用性
 // ================================================================
-function ValidateKeyBtn({ model, apiKey, baseUrl }: { model: string; apiKey: string; baseUrl: string }) {
+function ValidateKeyBtn({ model, apiKey, baseUrl, backend }: {
+  model: string; apiKey: string; baseUrl: string; backend: string
+}) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'fail'>('idle')
   const [msg, setMsg]       = useState('')
 
@@ -104,7 +106,7 @@ function ValidateKeyBtn({ model, apiKey, baseUrl }: { model: string; apiKey: str
     if (!model || !apiKey) { setMsg('请先填写 Model 和 API Key'); setStatus('fail'); return }
     setStatus('loading'); setMsg('')
     try {
-      const r = await api.validateApiKey(model, apiKey, baseUrl || undefined)
+      const r = await api.validateApiKey(model, apiKey, baseUrl || undefined, backend)
       setStatus(r.valid ? 'ok' : 'fail')
       setMsg(r.message)
     } catch (e: any) {
@@ -181,7 +183,7 @@ function AgentForm({ agent, state, onChange, onSave, saving, hasKey, showPrice, 
         <input type="password" value={state.api_key} onChange={e => set('api_key', e.target.value)}
           placeholder={hasKey ? '已保存（留空则不改动）' : 'sk-...'}
           className="w-full px-2 py-1.5 border border-ink-200 rounded focus:outline-none focus:border-ink-500" />
-        <ValidateKeyBtn model={state.model} apiKey={state.api_key} baseUrl={state.base_url} />
+        <ValidateKeyBtn model={state.model} apiKey={state.api_key} baseUrl={state.base_url} backend={state.backend} />
       </div>
 
       {/* Max Tokens */}
