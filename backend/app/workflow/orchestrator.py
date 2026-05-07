@@ -182,7 +182,9 @@ async def run_workflow(task_id: str) -> None:
             await emit(EventType.PHASE_EXIT, task_id, phase="coder")
 
             # ── Phase 3: Writer（分节写作 → 合并）───────────────────────
-            await task_manager.wait_if_paused(task_id)  # 届间检查点
+            # 章节固定编号（对齐参考项目 md_template.toml）：
+            #   摘要/标题 一问重 二问析 三假设 四符号+EDA 五建立与求解(5.N) 六敏感 七评价 八参考
+            await task_manager.wait_if_paused(task_id)
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="writer")
             await emit(EventType.PHASE_ENTER, task_id, phase="writer")
 
@@ -194,55 +196,120 @@ async def run_workflow(task_id: str) -> None:
             # 汇总 Coder 各阶段图表数据特征
             figure_features_text = "\n\n".join(s for s in coder_stdout_log if s.strip())
 
-            # 加载论文写作模板结构参考
-            template_ctx = _load_paper_template()
+            # 加载 TOML 模板（各节写作要求）
+            tpl = _load_md_template()
 
-            writer_ctx = (
-                (f"# 论文写作模板参考\n{template_ctx}\n\n---\n\n" if template_ctx else "")
-                + f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
-                + f"# 各问题描述\n"
-                + "\n".join(f"**问题{i}**：{questions.get(f'ques{i}','')}" for i in range(1, ques_count + 1))
-                + f"\n\n# 建模方案\n{modeling_plan}\n\n"
-                + f"# Coder 分析报告\n{coder_reports}\n\n"
-                + (f"# 图表数据特征（Coder print 输出，用于精确描述图表内容）\n{figure_features_text}\n\n"
-                   if figure_features_text.strip() else "")
-                + f"# 图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
+            # 公共背景 context（所有节共享）
+            bg_questions = "\n".join(
+                f"**问题{i}**：{questions.get(f'ques{i}','')}"
+                for i in range(1, ques_count + 1)
+            )
+            model_build_solve = coder_reports  # 给 Writer 看的"模型建立与求解"产出
+
+            base_ctx = (
+                f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
+                f"# 各问题描述\n{bg_questions}\n\n"
+                f"# 建模方案（Modeler 输出）\n{modeling_plan}\n\n"
+                f"# 模型建立与求解（Coder 报告）\n{model_build_solve}\n\n"
+                + (f"# 图表数据特征\n{figure_features_text}\n\n" if figure_features_text.strip() else "")
+                + f"# 全部图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
             )
 
-            # 分节写作（Writer 不用工具，直接返回文本，框架负责保存）
+            # 分节写作辅助
             def _save_section(sec_file: str, content: str) -> str:
                 p = work_dir / sec_file
-                # 若 LLM 已调用 write_file 则以文件为准，否则用返回值兜底
                 if not p.exists() or p.stat().st_size < 50:
                     p.write_text(content, encoding="utf-8")
                 return p.read_text(encoding="utf-8")
 
-            sections: list[str] = []
-            writer_sections = [
-                ("writer:abstract",    WRITER_SECTION_ABSTRACT,    "sec_abstract.md"),
-                ("writer:restatement", WRITER_SECTION_RESTATEMENT, "sec_restatement.md"),
-                ("writer:analysis",    WRITER_SECTION_ANALYSIS,    "sec_analysis.md"),
-                ("writer:assumptions", WRITER_SECTION_ASSUMPTIONS, "sec_assumptions.md"),
-                ("writer:eda",         WRITER_SECTION_EDA,         "sec_eda.md"),
-            ]
-            for phase_name, section_prompt, sec_file in writer_sections:
-                await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
+            async def _write_section(phase: str, prompt: str, sec_file: str) -> str:
+                await emit(EventType.PHASE_ENTER, task_id, phase=phase)
+                result = ""
                 try:
                     w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
                     _patch_agent_with_hitl(w, task_id)
-                    output = await w.run(writer_ctx + section_prompt)
-                    sections.append(_save_section(sec_file, output))
+                    output = await w.run(base_ctx + prompt)
+                    result = _save_section(sec_file, output)
                 except Exception as _e:
-                    logger.warning("writer {} failed (non-fatal): {}", phase_name, _e)
-                await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
-                await task_manager.wait_if_paused(task_id)  # 届间检查点
+                    logger.warning("writer {} failed (non-fatal): {}", phase, _e)
+                await emit(EventType.PHASE_EXIT, task_id, phase=phase)
+                await task_manager.wait_if_paused(task_id)
+                return result
 
-            # 逐问写作（章节序号从 6 起，基于前5个固定章节）
-            BASE_SECTION = 6  # 一问题重述 二问题分析 三假设 四符号 五EDA → 六开始是各问
+            sections: list[str] = []
+
+            # ① 摘要 / 标题 / 关键词
+            s = await _write_section(
+                "writer:abstract",
+                tpl.get("firstPage", WRITER_SECTION_ABSTRACT),
+                "sec_abstract.md",
+            )
+            if s: sections.append(s)
+
+            # ② 一、问题重述
+            s = await _write_section(
+                "writer:restatement",
+                tpl.get("RepeatQues", WRITER_SECTION_RESTATEMENT),
+                "sec_restatement.md",
+            )
+            if s: sections.append(s)
+
+            # ③ 二、问题分析
+            s = await _write_section(
+                "writer:analysis",
+                tpl.get("analysisQues", WRITER_SECTION_ANALYSIS),
+                "sec_analysis.md",
+            )
+            if s: sections.append(s)
+
+            # ④ 三、模型假设
+            s = await _write_section(
+                "writer:assumptions",
+                tpl.get("modelAssumption", WRITER_SECTION_ASSUMPTIONS),
+                "sec_assumptions.md",
+            )
+            if s: sections.append(s)
+
+            # ⑤ 四、符号说明（4.1）
+            s = await _write_section(
+                "writer:symbol",
+                tpl.get("symbol", ""),
+                "sec_symbol.md",
+            )
+            if s: sections.append(s)
+
+            # ⑥ 四.2 描述性统计（EDA，附 EDA 图表目录）
+            eda_figs = [e for e in figure_catalog if e.get("question") == 0]
+            eda_catalog = _format_catalog_for_writer(eda_figs)
+            eda_rp = work_dir / "eda_report.md"
+            eda_report = ""
+            if eda_rp.exists():
+                raw = eda_rp.read_text(encoding="utf-8")
+                eda_report = raw[:_REPORT_MAX_CHARS] + "\n…（已截断）" if len(raw) > _REPORT_MAX_CHARS else raw
+            eda_prompt = (
+                tpl.get("eda", WRITER_SECTION_EDA)
+                + f"\n\n# EDA 分析报告\n{eda_report}\n\n"
+                + f"# EDA 图表目录（必须全部插入）\n{eda_catalog}\n"
+            )
+            s = await _write_section("writer:eda", eda_prompt, "sec_eda.md")
+            if s: sections.append(s)
+
+            # ⑦ 五、模型的建立与求解（5.1 / 5.2 / 5.N 全部归于同一大章）
+            # 第一个问题带 # 五 标题，后续问题只带 ## 5.N 子标题
             for qi in range(1, ques_count + 1):
-                sec_no = BASE_SECTION + qi - 1
                 phase_name = f"writer:q{qi}"
-                await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
+                # 从 TOML 取对应问题模板（ques1/ques2/...）
+                ques_tpl_key = f"ques{qi}"
+                ques_tpl = tpl.get(ques_tpl_key, "")
+                if not ques_tpl:
+                    # 超出 TOML 预设时用通用模板
+                    header = "# 五、模型的建立与求解\n\n" if qi == 1 else ""
+                    ques_tpl = (
+                        f"{header}## 5.{qi} 问题{qi}模型的建立与求解\n\n"
+                        f"### 5.{qi}.1 模型的建立\n"
+                        f"### 5.{qi}.2 模型的求解\n约600字实质内容。"
+                    )
+
                 ques_figs = [e for e in figure_catalog if e.get("question") == qi]
                 ques_catalog = _format_catalog_for_writer(ques_figs)
                 ques_result = ""
@@ -250,75 +317,53 @@ async def run_workflow(task_id: str) -> None:
                 if rp.exists():
                     raw = rp.read_text(encoding="utf-8")
                     ques_result = raw[:_REPORT_MAX_CHARS] + "\n…（已截断）" if len(raw) > _REPORT_MAX_CHARS else raw
-                sec_roman = ["六","七","八","九","十"][sec_no - 6] if sec_no - 6 < 5 else str(sec_no)
-                q_sec_prompt = "\n".join([
-                    f"撰写论文【{sec_roman}、问题{qi}：建模与求解】章节，保存到 `sec_q{qi}.md`。",
+
+                q_prompt = "\n".join([
+                    ques_tpl,
                     "",
-                    f"### 问题描述",
+                    f"### 问题{qi}描述",
                     questions.get(f"ques{qi}", ""),
                     "",
-                    f"### Coder 求解报告（含全部关键数值）",
-                    ques_result or "（无报告，依据建模方案推断）",
+                    f"### Coder 求解报告（问题{qi}，含全部关键数值）",
+                    ques_result or "（无报告，依据建模方案撰写）",
                     "",
-                    f"### 本问图表目录（必须全部插入正文，一张不得遗漏）",
-                    ques_catalog or "（本问暂无生成图表，以文字描述结果）",
+                    f"### 本问图表目录（必须全部插入，一张不得遗漏）",
+                    ques_catalog or "（本问暂无图表，以文字描述结果）",
                     "",
-                    "### 写作要求（必须全部满足）",
-                    f"1. 正文不少于 800 字实质内容（不含图表标注）；",
-                    f"2. 严格按以下结构输出（章节标题格式照抄）：",
-                    f"   `## {sec_roman}、问题{qi}：[依据结果自拟子标题]`",
-                    f"   `### {sec_no}.1 问题分析与建模思路`（150-200字：难点分析、方法选择理由、与备选方法对比）",
-                    f"   `### {sec_no}.2 模型建立`（完整数学公式推导：变量定义→目标函数→约束条件→参数来源三选一：数据统计/文献/交叉验证）",
-                    f"   `### {sec_no}.3 求解过程`（算法步骤、迭代逻辑、关键参数设置，说明参数来源）",
-                    f"   `### {sec_no}.4 结果分析`（逐项引用 Coder 报告数值，插入全部图表）",
-                    f"   `### {sec_no}.5 本问小结`（50-80字，归纳核心结论，不得使用列举，必须段落式）",
-                    f"3. 每个模型公式独立成行 `$$...$$`，变量首次出现时用 `$...$` 定义含义；",
-                    f"4. 每张图前2-3句分析铺垫（结合具体数值），图后2句结论，格式：![caption](filename)\n**图N：caption**；",
-                    f"5. 所有数值来自 Coder 报告，精确到4位有效数字，严禁编造；",
-                    f"6. 全文禁止 bullet 列举，必须段落式叙述。",
+                    "### 写作约束（必须全部满足）",
+                    f"- 正文不少于600字实质内容（不含图表标注）；",
+                    f"- 每个公式独立成行 $$...$$，变量首次出现时定义含义；",
+                    f"- 每张图前2-3句铺垫（含具体数值），图后1-2句结论；",
+                    f"- 图表格式：![描述](文件名)\\n**图X：说明**；",
+                    f"- 所有数值来自 Coder 报告，精确4位有效数字，严禁编造；",
+                    f"- 全文禁止 bullet 列举，段落式叙述。",
                 ])
-                try:
-                    w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-                    _patch_agent_with_hitl(w, task_id)
-                    output = await w.run(writer_ctx + q_sec_prompt)
-                    sections.append(_save_section(f"sec_q{qi}.md", output))
-                except Exception as _e:
-                    logger.warning("writer:q{} failed (non-fatal): {}", qi, _e)
-                await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
-                await task_manager.wait_if_paused(task_id)  # 逐问间检查点
+                s = await _write_section(phase_name, q_prompt, f"sec_q{qi}.md")
+                if s: sections.append(s)
 
-            # 敏感性分析节
-            await emit(EventType.PHASE_ENTER, task_id, phase="writer:sensitivity")
+            # ⑧ 六、模型的分析与检验（敏感性分析，固定为第六章）
             sens_p = work_dir / "sensitivity_report.md"
-            sens_ctx = ""
+            sens_report = ""
             if sens_p.exists():
-                sens_ctx = f"\n# 敏感性分析报告\n{sens_p.read_text(encoding='utf-8')[:8000]}\n"
+                raw = sens_p.read_text(encoding="utf-8")
+                sens_report = raw[:_REPORT_MAX_CHARS] + "\n…（已截断）" if len(raw) > _REPORT_MAX_CHARS else raw
             sens_figs = [e for e in figure_catalog if e.get("question") == -1]
             sens_catalog = _format_catalog_for_writer(sens_figs)
-            try:
-                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-                _patch_agent_with_hitl(w, task_id)
-                output = await w.run(
-                    writer_ctx + sens_ctx
-                    + f"\n# 敏感性分析图表（必须全部插入）\n{sens_catalog}\n\n"
-                    + WRITER_SECTION_SENSITIVITY
-                )
-                sections.append(_save_section("sec_sensitivity.md", output))
-            except Exception as _e:
-                logger.warning("writer:sensitivity failed (non-fatal): {}", _e)
-            await emit(EventType.PHASE_EXIT, task_id, phase="writer:sensitivity")
-            await task_manager.wait_if_paused(task_id)
+            sens_prompt = (
+                tpl.get("sensitivity_analysis", WRITER_SECTION_SENSITIVITY)
+                + f"\n\n# 敏感性分析报告\n{sens_report}\n\n"
+                + f"# 敏感性图表（必须全部插入）\n{sens_catalog}\n"
+            )
+            s = await _write_section("writer:sensitivity", sens_prompt, "sec_sensitivity.md")
+            if s: sections.append(s)
 
-            # 模型评价节
-            await emit(EventType.PHASE_ENTER, task_id, phase="writer:evaluation")
-            try:
-                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-                _patch_agent_with_hitl(w, task_id)
-                output = await w.run(writer_ctx + WRITER_SECTION_EVALUATION)
-                sections.append(_save_section("sec_evaluation.md", output))
-            except Exception as _e:
-                logger.warning("writer:evaluation failed (non-fatal): {}", _e)
-            await emit(EventType.PHASE_EXIT, task_id, phase="writer:evaluation")
+            # ① 模型评价 + 八、参考文献（固定为第七章）
+            s = await _write_section(
+                "writer:evaluation",
+                tpl.get("judge", WRITER_SECTION_EVALUATION),
+                "sec_evaluation.md",
+            )
+            if s: sections.append(s)
 
             # 合并所有节 → paper.md
             paper_md = work_dir / "paper.md"
@@ -446,12 +491,35 @@ def _format_catalog_for_writer(catalog: list[dict]) -> str:
 def _load_paper_template() -> str:
     """加载 config/paper_template.md，失败则返回空字符串。"""
     try:
-        tpl = Path(__file__).parent.parent / "config" / "paper_template.md"
-        if tpl.exists():
-            return tpl.read_text(encoding="utf-8")
+        p = Path(__file__).parent.parent / "config" / "paper_template.md"
+        if p.exists():
+            return p.read_text(encoding="utf-8")
     except Exception as e:
         logger.warning("paper_template.md 加载失败: {}", e)
     return ""
+
+
+def _load_md_template() -> dict[str, str]:
+    """加载 config/md_template.toml。
+    返回 dict[section_key, prompt_str]，失败时返回空字典（各节将降级用 prompts.py 常选）。
+    """
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            logger.warning("tomllib/tomli 不可用，跳过 TOML 模板加载")
+            return {}
+    try:
+        p = Path(__file__).parent.parent / "config" / "md_template.toml"
+        if p.exists():
+            with open(p, "rb") as f:
+                data = tomllib.load(f)
+            return {k: v for k, v in data.items() if isinstance(v, str)}
+    except Exception as e:
+        logger.warning("md_template.toml 加载失败: {}", e)
+    return {}
 
 
 def _extract_figure_features(agent_output: str, label: str = "") -> str:
