@@ -210,10 +210,13 @@ async def run_workflow(task_id: str) -> None:
             ]
             for phase_name, section_prompt, sec_file in writer_sections:
                 await emit(EventType.PHASE_ENTER, task_id, phase=phase_name)
-                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-                _patch_agent_with_hitl(w, task_id)
-                output = await w.run(writer_ctx + section_prompt)
-                sections.append(_save_section(sec_file, output))
+                try:
+                    w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                    _patch_agent_with_hitl(w, task_id)
+                    output = await w.run(writer_ctx + section_prompt)
+                    sections.append(_save_section(sec_file, output))
+                except Exception as _e:
+                    logger.warning("writer {} failed (non-fatal): {}", phase_name, _e)
                 await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
                 await task_manager.wait_if_paused(task_id)  # 届间检查点
 
@@ -252,10 +255,13 @@ async def run_workflow(task_id: str) -> None:
                     f"4. 每张图前2-3句分析铺垫，图后1-2句结论，图表标注严格用规定格式；",
                     f"5. 所有数值来自 Coder 报告，精确到4位有效数字，不得编造。",
                 ])
-                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-                _patch_agent_with_hitl(w, task_id)
-                output = await w.run(writer_ctx + q_sec_prompt)
-                sections.append(_save_section(f"sec_q{qi}.md", output))
+                try:
+                    w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                    _patch_agent_with_hitl(w, task_id)
+                    output = await w.run(writer_ctx + q_sec_prompt)
+                    sections.append(_save_section(f"sec_q{qi}.md", output))
+                except Exception as _e:
+                    logger.warning("writer:q{} failed (non-fatal): {}", qi, _e)
                 await emit(EventType.PHASE_EXIT, task_id, phase=phase_name)
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
@@ -267,23 +273,29 @@ async def run_workflow(task_id: str) -> None:
                 sens_ctx = f"\n# 敏感性分析报告\n{sens_p.read_text(encoding='utf-8')[:8000]}\n"
             sens_figs = [e for e in figure_catalog if e.get("question") == -1]
             sens_catalog = _format_catalog_for_writer(sens_figs)
-            w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-            _patch_agent_with_hitl(w, task_id)
-            output = await w.run(
-                writer_ctx + sens_ctx
-                + f"\n# 敏感性分析图表（必须全部插入）\n{sens_catalog}\n\n"
-                + WRITER_SECTION_SENSITIVITY
-            )
-            sections.append(_save_section("sec_sensitivity.md", output))
+            try:
+                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                _patch_agent_with_hitl(w, task_id)
+                output = await w.run(
+                    writer_ctx + sens_ctx
+                    + f"\n# 敏感性分析图表（必须全部插入）\n{sens_catalog}\n\n"
+                    + WRITER_SECTION_SENSITIVITY
+                )
+                sections.append(_save_section("sec_sensitivity.md", output))
+            except Exception as _e:
+                logger.warning("writer:sensitivity failed (non-fatal): {}", _e)
             await emit(EventType.PHASE_EXIT, task_id, phase="writer:sensitivity")
             await task_manager.wait_if_paused(task_id)
 
             # 模型评价节
             await emit(EventType.PHASE_ENTER, task_id, phase="writer:evaluation")
-            w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
-            _patch_agent_with_hitl(w, task_id)
-            output = await w.run(writer_ctx + WRITER_SECTION_EVALUATION)
-            sections.append(_save_section("sec_evaluation.md", output))
+            try:
+                w = WriterAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=4)
+                _patch_agent_with_hitl(w, task_id)
+                output = await w.run(writer_ctx + WRITER_SECTION_EVALUATION)
+                sections.append(_save_section("sec_evaluation.md", output))
+            except Exception as _e:
+                logger.warning("writer:evaluation failed (non-fatal): {}", _e)
             await emit(EventType.PHASE_EXIT, task_id, phase="writer:evaluation")
 
             # 合并所有节 → paper.md

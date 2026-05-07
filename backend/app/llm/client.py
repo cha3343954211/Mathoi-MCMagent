@@ -162,7 +162,7 @@ async def stream_for_user(
 # ---------- 后端实现 ----------
 async def _call_openai(cfg: ResolvedConfig, params: dict[str, Any]) -> dict[str, Any]:
     from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None)
+    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0)
     resp = await client.chat.completions.create(**params)
     return resp.model_dump()
 
@@ -220,7 +220,7 @@ async def _call_openai_streaming(
     自动降级：若提供商不支持 stream_options 则去掉该参数重试。
     """
     from openai import AsyncOpenAI, BadRequestError
-    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None)
+    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0)
     # 先尝试带 include_usage 的流（标准 OpenAI 支持）
     try:
         return await _stream_chunks_openai(
@@ -244,7 +244,7 @@ async def _call_openai_streaming(
 
 async def _stream_openai(cfg: ResolvedConfig, params: dict[str, Any]) -> AsyncIterator[str]:
     from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None)
+    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0)
     stream = await client.chat.completions.create(**params)
     async for chunk in stream:
         delta = chunk.choices[0].delta

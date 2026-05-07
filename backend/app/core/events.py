@@ -85,11 +85,17 @@ class EventBus:
     # 不写入 DB / 不进历史的事件类型（仅推送给当前活跃订阅者）
     _NO_PERSIST = frozenset({EventType.AGENT_STREAM_CHUNK})
 
+    _MAX_HISTORY_PER_TASK = 2000   # 每任务最多保留事件数
+    _TRIM_TO = 1500                # 超限后裁剪至此数量
+
     # ---- publish --------------------------------------------------------
     async def publish(self, event: Event) -> None:
         async with self._lock:
             if event.type not in self._NO_PERSIST:
-                self._history[event.task_id].append(event)
+                hist = self._history[event.task_id]
+                hist.append(event)
+                if len(hist) > self._MAX_HISTORY_PER_TASK:
+                    self._history[event.task_id] = hist[-self._TRIM_TO:]
             queues = list(self._subscribers.get(event.task_id, []))
         for q in queues:
             try:
