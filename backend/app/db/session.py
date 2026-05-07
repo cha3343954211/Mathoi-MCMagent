@@ -62,7 +62,7 @@ async def init_db() -> None:
     from ..auth.security import hash_password
     from sqlalchemy import select
     async with AsyncSessionLocal() as s:
-        exists = (await s.execute(select(User).where(User.role == UserRole.ADMIN.value))).scalar_one_or_none()
+        exists = (await s.execute(select(User).where(User.role == UserRole.ADMIN.value))).scalars().first()
         if not exists:
             admin = User(
                 username=_settings.default_admin_username,

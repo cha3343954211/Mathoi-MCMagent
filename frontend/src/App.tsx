@@ -88,7 +88,8 @@ export default function App() {
   if (!user) return <AuthPage />
 
   return (
-    <div className="h-full flex">
+    // h-dvh: 移动端地址栏自适应（比 h-screen / h-full 更可靠）
+    <div className="h-dvh flex">
       {/* ======== 移动端遗罩层 ======== */}
       {mobileOpen && (
         <div
@@ -227,75 +228,109 @@ export default function App() {
         ) : (
           <>
             {/* 任务头部 */}
-            <header className="px-3 sm:px-5 py-2 sm:py-3 border-b border-ink-200 flex items-center gap-2 sm:gap-3 min-w-0">
-              {/* 标题区：桌面可见，移动端已有 sticky header 显示 */}
-              <div className="flex-1 min-w-0 hidden sm:block">
-                <div className="flex items-center gap-2">
-                  <h2 className="text-base font-semibold truncate">{current.title}</h2>
-                  <StateBadge state={current.state} />
-                </div>
-                <p className="text-[11px] text-ink-400 mt-0.5 font-mono truncate">
-                  #{current.task_id}
-                  {current.phase ? ` · ${current.phase}` : ''}
-                </p>
-              </div>
-              {/* 移动端也需 flex-1 占位使按钮靠右 */}
-              <div className="flex-1 sm:hidden" />
-
-              {/* 操作按钮 */}
-              <div className="flex items-center gap-1.5 shrink-0">
-                {/* WS 连接状态 */}
-                {current && <WsBadge status={wsStatus} />}
-                {/* 运行计时 */}
-                {current?.state === 'running' && runSecs > 0 && (
-                  <span className="text-[11px] text-ink-400 font-mono">{fmtDuration(runSecs)}</span>
-                )}
-                {/* 中断 Kernel（仅运行中，停止死循环） */}
-                {current?.state === 'running' && (
-                  <button
-                    title="中断当前代码执行（停止死循环）"
-                    onClick={async () => {
-                      const msg = await interruptCurrent()
-                      setInterruptMsg(msg)
-                      setTimeout(() => setInterruptMsg(''), 3000)
-                    }}
-                    className="text-xs px-2.5 py-1.5 text-orange-600 hover:bg-orange-50 rounded-lg transition-colors border border-orange-200">
-                    ■ 中断
-                  </button>
-                )}
-                {/* 取消（仅运行中/暂停/等待时） */}
-                {['running', 'paused', 'awaiting_hitl', 'pending'].includes(current.state) && (
-                  <button onClick={async () => {
-                    try { await api.cancel(current.task_id) } catch {}
-                    setTimeout(() => useStore.getState().refreshCurrent(), 400)
-                  }}
-                    className="text-xs px-2.5 py-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-red-200">
-                    取消运行
-                  </button>
-                )}
-                {/* 中断提示 */}
-                {interruptMsg && (
-                  <span className="text-[11px] text-orange-600 bg-orange-50 px-2 py-1 rounded">{interruptMsg}</span>
-                )}
-                {/* 删除任务 */}
-                {!confirmDelete ? (
-                  <button onClick={() => setConfirmDelete(true)}
-                    title="删除任务（含工作区文件）"
-                    className="text-xs px-2.5 py-1.5 text-ink-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-ink-200 flex items-center gap-1">
-                    <TrashIcon sm /> 删除
-                  </button>
-                ) : (
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-red-600">确认删除？</span>
-                    <button onClick={() => setConfirmDelete(false)}
-                      className="text-xs px-2 py-1 text-ink-500 hover:bg-ink-100 rounded">取消</button>
-                    <button onClick={doDeleteCurrent} disabled={deleting}
-                      className="text-xs px-2.5 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">
-                      {deleting ? '…' : '删除'}
-                    </button>
+            <header className="border-b border-ink-200 shrink-0">
+              {/* 第一行：标题（桌面）+ 操作按钮 */}
+              <div className="px-3 sm:px-5 py-2 flex items-center gap-2 min-w-0">
+                {/* 标题区（桌面可见） */}
+                <div className="flex-1 min-w-0 hidden sm:block">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-semibold truncate">{current.title}</h2>
+                    <StateBadge state={current.state} />
                   </div>
-                )}
-                <Tabs tab={tab} setTab={setTab} />
+                  <p className="text-[11px] text-ink-400 mt-0.5 font-mono truncate">
+                    #{current.task_id}{current.phase ? ` · ${current.phase}` : ''}
+                  </p>
+                </div>
+                {/* 移动端 spacer */}
+                <div className="flex-1 sm:hidden" />
+
+                {/* 操作按钮区（移动端精简） */}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {/* WS 状态：桌面显示 */}
+                  <span className="hidden sm:flex">
+                    <WsBadge status={wsStatus} />
+                  </span>
+                  {/* 运行计时：桌面显示 */}
+                  {current?.state === 'running' && runSecs > 0 && (
+                    <span className="hidden sm:inline text-[11px] text-ink-400 font-mono">
+                      {fmtDuration(runSecs)}
+                    </span>
+                  )}
+                  {/* 中断：运行中显示，移动端仅显图标 */}
+                  {current?.state === 'running' && (
+                    <button
+                      title="中断代码执行"
+                      onClick={async () => {
+                        const msg = await interruptCurrent()
+                        setInterruptMsg(msg)
+                        setTimeout(() => setInterruptMsg(''), 3000)
+                      }}
+                      className="flex items-center gap-1 text-xs px-2 py-1.5 text-orange-600 hover:bg-orange-50 rounded-lg transition-colors border border-orange-200">
+                      <span>■</span>
+                      <span className="hidden sm:inline">中断</span>
+                    </button>
+                  )}
+                  {/* 取消 */}
+                  {['running', 'paused', 'awaiting_hitl', 'pending'].includes(current.state) && (
+                    <button
+                      onClick={async () => {
+                        try { await api.cancel(current.task_id) } catch {}
+                        setTimeout(() => useStore.getState().refreshCurrent(), 400)
+                      }}
+                      className="flex items-center gap-1 text-xs px-2 py-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-red-200">
+                      <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
+                        <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+                      </svg>
+                      <span className="hidden sm:inline">取消</span>
+                    </button>
+                  )}
+                  {/* 删除：展开/折叠 */}
+                  {!confirmDelete ? (
+                    <button
+                      onClick={() => setConfirmDelete(true)}
+                      title="删除任务"
+                      className="flex items-center gap-1 text-xs px-2 py-1.5 text-ink-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-ink-200">
+                      <TrashIcon sm />
+                      <span className="hidden sm:inline">删除</span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-red-600 hidden sm:inline">确认删除？</span>
+                      <button onClick={() => setConfirmDelete(false)}
+                        className="text-xs px-2 py-1 text-ink-500 hover:bg-ink-100 rounded">取消</button>
+                      <button onClick={doDeleteCurrent} disabled={deleting}
+                        className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">
+                        {deleting ? '…' : '删除'}
+                      </button>
+                    </div>
+                  )}
+                  {/* Tab 切换：仅桌面，移动端单独一行 */}
+                  <span className="hidden sm:flex">
+                    <Tabs tab={tab} setTab={setTab} />
+                  </span>
+                </div>
+              </div>
+
+              {/* 中断提示条（Toast） */}
+              {interruptMsg && (
+                <div className="px-3 py-1 bg-orange-50 border-t border-orange-200 text-[11px] text-orange-600">
+                  {interruptMsg}
+                </div>
+              )}
+
+              {/* 第二行：移动端 Tab 切换（全宽） */}
+              <div className="sm:hidden flex border-t border-ink-100">
+                {([['trace', '📊 追踪'] as const, ['files', '📁 产物'] as const]).map(([k, v]) => (
+                  <button key={k} onClick={() => setTab(k)}
+                    className={clsx(
+                      'flex-1 py-2 text-xs font-medium transition-colors',
+                      tab === k
+                        ? 'bg-ink-800 text-white'
+                        : 'text-ink-500 hover:bg-ink-50'
+                    )}>
+                    {v}
+                  </button>
+                ))}
               </div>
             </header>
 
@@ -325,7 +360,7 @@ export default function App() {
 // ----------------------------------------------------------------
 function Empty({ onNew }: { onNew: () => void }) {
   return (
-    <div className="h-full flex flex-col items-center justify-center text-ink-400 gap-3">
+    <div className="h-full flex flex-col items-center justify-center text-ink-400 gap-3 px-6">
       <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="1.5"
         className="w-16 h-16 opacity-20">
         <rect x="8" y="8" width="48" height="48" rx="6" />
@@ -333,10 +368,13 @@ function Empty({ onNew }: { onNew: () => void }) {
       </svg>
       <div className="text-center">
         <p className="text-sm font-medium text-ink-600">选择或新建任务</p>
-        <p className="text-xs text-ink-400 mt-1">左侧列表选择已有任务，或点击下方新建</p>
+        {/* 桌面提示 */}
+        <p className="text-xs text-ink-400 mt-1 hidden sm:block">左侧列表选择已有任务，或点击下方新建</p>
+        {/* 移动端提示 */}
+        <p className="text-xs text-ink-400 mt-1 sm:hidden">点击左上角 ☰ 打开任务列表</p>
       </div>
       <button onClick={onNew}
-        className="mt-1 px-4 py-2 bg-ink-800 text-white text-sm rounded-lg hover:bg-ink-700 transition-colors">
+        className="mt-1 px-5 py-2.5 bg-ink-800 text-white text-sm rounded-lg hover:bg-ink-700 transition-colors">
         新建任务
       </button>
     </div>
