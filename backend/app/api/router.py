@@ -368,38 +368,41 @@ async def create_task(
 
 @router.get("/tasks", response_model=list[TaskResponse])
 async def list_tasks(user: User = Depends(get_current_user)) -> list[TaskResponse]:
-    return [_to_response(t) for t in task_manager.list_for_user(user.id)]
+    tasks = await task_manager.list_visible_for(user.id, is_admin=(user.role == "admin"))
+    # 仅展示自己的任务（即使 admin 也只看自己创建的；管理后台才看全部）
+    own = [t for t in tasks if t.user_id == user.id]
+    return [_to_response(t) for t in own]
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: str, user: User = Depends(get_current_user)) -> TaskResponse:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     return _to_response(t)
 
 
 @router.get("/tasks/{task_id}/events")
 async def get_history(task_id: str, user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     return [e.to_dict() for e in await bus.history_async(task_id)]
 
 
 @router.post("/tasks/{task_id}/pause")
 async def pause(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     await task_manager.pause(task_id)
     return {"ok": True}
 
 
 @router.post("/tasks/{task_id}/resume")
 async def resume(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     await task_manager.resume(task_id)
     return {"ok": True}
 
 
 @router.post("/tasks/{task_id}/cancel")
 async def cancel(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     await task_manager.cancel(task_id)
     return {"ok": True}
 
@@ -416,7 +419,7 @@ async def rewrite_section(
                         "assumptions" | "symbol" | "eda" |
                         "q1" | "q2" | ... | "sensitivity" | "evaluation" }
     """
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     if t.state == TaskState.RUNNING:
         raise HTTPException(400, "任务正在运行，请等待完成后再重写章节")
 
@@ -442,7 +445,7 @@ async def rewrite_section(
 @router.post("/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """向当前正在执行代码的 Kernel 发送中断信号，停止死循环。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     ok = await task_manager.interrupt_task(task_id)
     return {"ok": ok, "message": "已发送中断信号" if ok else "无活跃 Kernel，任务可能已完成"}
 
@@ -450,7 +453,7 @@ async def interrupt_task(task_id: str, user: User = Depends(get_current_user)) -
 @router.post("/tasks/{task_id}/retry")
 async def retry(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """重试失败/取消的任务：清空错误、重置状态、重新启动工作流。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     if t.state not in (TaskState.FAILED, TaskState.CANCELLED):
         raise HTTPException(400, f"任务当前状态 {t.state.value} 不可重试（仅 failed/cancelled 可重试）")
     # 只取消 asyncio handle，不发 TASK_CANCELLED 事件（避免前端状态闪烁）
@@ -479,14 +482,14 @@ class HITLReply(BaseModel):
 
 @router.post("/tasks/{task_id}/hitl")
 async def hitl_reply(task_id: str, body: HITLReply, user: User = Depends(get_current_user)) -> dict[str, Any]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     await task_manager.reply_hitl(task_id, body.model_dump())
     return {"ok": True}
 
 
 @router.delete("/tasks/{task_id}")
 async def delete_task(task_id: str, user: User = Depends(get_current_user)) -> dict:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     await task_manager.delete(task_id)
     bus.evict(task_id)   # 清除内存缓存（DB 由 CASCADE FK 自动删除）
     return {"ok": True}
@@ -495,14 +498,14 @@ async def delete_task(task_id: str, user: User = Depends(get_current_user)) -> d
 # ---------- 任务 token 用量 ----------
 @router.get("/tasks/{task_id}/usage")
 async def get_task_usage(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     return await stats_for_task(task_id)
 
 
 # ---------- 文件 ----------
 @router.get("/tasks/{task_id}/files")
 async def list_files(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir)
     files = []
     for p in sorted(wd.rglob("*")):
@@ -513,7 +516,7 @@ async def list_files(task_id: str, user: User = Depends(get_current_user)) -> di
 
 @router.get("/tasks/{task_id}/files/{path:path}")
 async def get_file(task_id: str, path: str, user: User = Depends(get_current_user)) -> Any:
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir).resolve()
     target = (wd / path).resolve()
     if not str(target).startswith(str(wd)) or not target.exists():
@@ -531,7 +534,7 @@ async def write_file(
     写入 sec_*.md 后自动重组 paper.md。
     body: { "content": "文件内容" }
     """
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     if t.state == TaskState.RUNNING:
         raise HTTPException(400, "任务正在运行，请等待完成后再编辑")
 
@@ -572,7 +575,7 @@ async def write_file(
 @router.get("/tasks/{task_id}/notebook")
 async def download_notebook(task_id: str, user: User = Depends(get_current_user)) -> Any:
     """下载任务的 Jupyter Notebook（.ipynb），包含所有代码执行过程和输出。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     nb_path = Path(t.work_dir) / "notebook.ipynb"
     if not nb_path.exists():
         raise HTTPException(404, detail="Notebook 尚未生成（任务未开始或尚无代码执行）")
@@ -586,7 +589,7 @@ async def download_notebook(task_id: str, user: User = Depends(get_current_user)
 @router.get("/tasks/{task_id}/archive")
 async def download_archive(task_id: str, user: User = Depends(get_current_user)) -> Any:
     """将工作区所有文件打包为 ZIP 下载。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     import io, zipfile as _zip
     wd = Path(t.work_dir)
     buf = io.BytesIO()
@@ -605,7 +608,7 @@ async def download_archive(task_id: str, user: User = Depends(get_current_user))
 @router.get("/tasks/{task_id}/export/docx")
 async def export_docx(task_id: str, user: User = Depends(get_current_user)) -> Any:
     """将 paper.md 导出为 DOCX（pandoc 优先，降级 python-docx）。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir)
     md_path = wd / "paper.md"
     if not md_path.exists():
@@ -628,7 +631,7 @@ async def export_docx(task_id: str, user: User = Depends(get_current_user)) -> A
 @router.get("/tasks/{task_id}/export/pdf")
 async def export_pdf(task_id: str, user: User = Depends(get_current_user)) -> Any:
     """将 paper.md 通过 pandoc 导出为 PDF。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir)
     md_path = wd / "paper.md"
     if not md_path.exists():
@@ -647,7 +650,7 @@ async def export_pdf(task_id: str, user: User = Depends(get_current_user)) -> An
 @router.get("/tasks/{task_id}/files/{path:path}/as/ipynb")
 async def export_ipynb(task_id: str, path: str, user: User = Depends(get_current_user)) -> Any:
     """将工作区 .py 文件转换为 Jupyter Notebook 格式下载。"""
-    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir).resolve()
     target = (wd / path).resolve()
     if not str(target).startswith(str(wd)) or not target.exists():
@@ -732,7 +735,7 @@ async def ws_task(ws: WebSocket, task_id: str) -> None:
         user = await get_user_from_token(token, session)
     if not user:
         await ws.close(code=4401); return
-    t = task_manager.get(task_id)
+    t = await task_manager.get_or_load(task_id)
     if not t or (t.user_id != user.id and user.role != "admin"):
         await ws.close(code=4403); return
 

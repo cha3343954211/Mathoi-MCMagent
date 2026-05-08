@@ -234,7 +234,54 @@ class TaskManager:
         await self._persist_task(t)
 
     def get(self, task_id: str) -> Optional[Task]:
+        """同步查询（仅内存）。运行期内部调用使用，REST 端点请用 get_or_load。"""
         return self._tasks.get(task_id)
+
+    async def get_or_load(self, task_id: str) -> Optional[Task]:
+        """REST/WS 端点专用：内存优先，未命中则从 DB 懒加载并回填缓存。
+
+        修复历史任务被 _maybe_evict 淘汰后点击返回 404 的问题。
+        """
+        t = self._tasks.get(task_id)
+        if t is not None:
+            return t
+        try:
+            from ..db import AsyncSessionLocal, TaskRecord
+            async with AsyncSessionLocal() as s:
+                rec = (await s.execute(
+                    select(TaskRecord).where(TaskRecord.task_id == task_id)
+                )).scalar_one_or_none()
+            if rec is None:
+                return None
+            t = self._task_from_record(rec)
+        except Exception as e:
+            logger.warning("get_or_load failed for {}: {}", task_id, e)
+            return None
+        # 回填缓存（终态任务不会触发 _maybe_evict 的频繁淘汰）
+        self._tasks[t.task_id] = t
+        if t.task_id not in self._pause_events:
+            ev = asyncio.Event(); ev.set()
+            self._pause_events[t.task_id] = ev
+        if t.task_id not in self._hitl_events:
+            self._hitl_events[t.task_id] = asyncio.Event()
+        return t
+
+    @staticmethod
+    def _task_from_record(r: Any) -> Task:
+        """从 ORM 记录还原 Task 对象（与 init() 保持一致）。"""
+        state = TaskState(r.state) if r.state in TaskState._value2member_map_ else TaskState.PENDING
+        # 终止重启遗留：若仍是运行态，视为已 cancelled
+        if state in (TaskState.RUNNING, TaskState.PAUSED, TaskState.AWAITING_HITL):
+            state = TaskState.CANCELLED
+        return Task(
+            task_id=r.task_id, user_id=r.user_id,
+            title=r.title, problem=r.problem,
+            data_files=json.loads(r.data_files or "[]"),
+            image_files=json.loads(getattr(r, "image_files", None) or "[]"),
+            state=state, phase=r.phase, error=r.error,
+            work_dir=r.work_dir,
+            created_at=r.created_at, updated_at=r.updated_at,
+        )
 
     def get_for_user(self, task_id: str, user_id: int, is_admin: bool = False) -> Optional[Task]:
         t = self._tasks.get(task_id)
@@ -245,10 +292,37 @@ class TaskManager:
         return None
 
     def list_for_user(self, user_id: int) -> list[Task]:
+        """同步：仅返回内存中的任务（兼容旧调用点）。"""
         return sorted(
             [t for t in self._tasks.values() if t.user_id == user_id],
             key=lambda x: -x.created_at,
         )
+
+    async def list_visible_for(self, user_id: int, is_admin: bool = False) -> list[Task]:
+        """REST 列表端点专用：DB 全量 + 内存覆盖（内存版本字段更新）。
+
+        修复历史任务被淘汰后从前端列表消失的问题。
+        """
+        try:
+            from ..db import AsyncSessionLocal, TaskRecord
+            async with AsyncSessionLocal() as s:
+                stmt = select(TaskRecord)
+                if not is_admin:
+                    stmt = stmt.where(TaskRecord.user_id == user_id)
+                rows = (await s.execute(stmt)).scalars().all()
+        except Exception as e:
+            logger.warning("list_visible_for DB read failed: {}", e)
+            # DB 不可用时降级到内存
+            if is_admin:
+                return self.list_all()
+            return self.list_for_user(user_id)
+
+        result: list[Task] = []
+        for r in rows:
+            mem = self._tasks.get(r.task_id)
+            # 内存版本优先（运行中字段更新），否则用 DB 还原
+            result.append(mem if mem is not None else self._task_from_record(r))
+        return sorted(result, key=lambda x: -x.created_at)
 
     def list_all(self) -> list[Task]:
         return sorted(self._tasks.values(), key=lambda x: -x.created_at)
