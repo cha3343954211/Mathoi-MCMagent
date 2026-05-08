@@ -126,15 +126,29 @@ export function FilesPanel() {
         sidebarOpen ? 'w-48 sm:w-56' : 'w-0 overflow-hidden border-r-0'
       )}>
         {/* 头部：下载按钮 */}
-        <div className="px-3 py-2 border-b border-ink-100 shrink-0 flex items-center justify-between">
+        <div className="px-3 py-2 border-b border-ink-100 shrink-0 flex items-center gap-2">
           <a href={api.archiveUrl(current.task_id)} download={`${current.task_id}.zip`}
-            className="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-800 transition-colors">
+            className="flex items-center gap-1 text-xs text-ink-500 hover:text-ink-800 transition-colors"
+            title="下载全部文件 ZIP">
             <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
               <path d="M8.75 2.75a.75.75 0 0 0-1.5 0v5.69L5.03 6.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 8.44V2.75Z" />
               <path d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z" />
             </svg>
-            <span className="truncate">下载 ZIP</span>
+            <span>ZIP</span>
           </a>
+          {/* Notebook 下载（运行中或完成后可用）*/}
+          {files.some(f => f.name === 'notebook.ipynb') && (
+            <a href={api.notebookUrl(current.task_id)}
+              download={`${current.task_id}_notebook.ipynb`}
+              className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800 transition-colors"
+              title="下载 Jupyter Notebook（可复现执行过程）">
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
+                <path fillRule="evenodd" d="M8 1a.75.75 0 0 1 .75.75V6h3.5a.75.75 0 0 1 0 1.5h-3.5v3.5a.75.75 0 0 1-1.5 0V7.5H3.75a.75.75 0 0 1 0-1.5h3.5V1.75A.75.75 0 0 1 8 1Z" clipRule="evenodd" />
+                <path d="M2 13.25a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z" />
+              </svg>
+              <span>.ipynb</span>
+            </a>
+          )}
         </div>
 
         {/* 文件列表 */}

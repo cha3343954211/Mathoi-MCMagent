@@ -178,6 +178,7 @@ async def run_workflow(task_id: str) -> None:
             coder_stdout_log: list[str] = []
 
             # 2a: EDA（只传 eda 方案）
+            sandbox.add_phase_marker("探索性数据分析（EDA）")
             await emit(EventType.PHASE_ENTER, task_id, phase="coder:eda")
             coder_eda = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                    max_iterations=settings.max_coder_iterations)
@@ -204,6 +205,7 @@ async def run_workflow(task_id: str) -> None:
             for qi in range(1, ques_count + 1):
                 ques_key = f"ques{qi}"
                 ques_text = questions.get(ques_key, f"问题{qi}")
+                sandbox.add_phase_marker(f"问题 {qi} 建模与求解")
                 await emit(EventType.PHASE_ENTER, task_id, phase=f"coder:q{qi}")
                 coder_q = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                      max_iterations=settings.max_coder_iterations)
@@ -247,6 +249,7 @@ async def run_workflow(task_id: str) -> None:
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
             # 2c: 敏感性分析（只传 sensitivity_analysis 方案）
+            sandbox.add_phase_marker("敏感性分析")
             await emit(EventType.PHASE_ENTER, task_id, phase="coder:sensitivity")
             coder_sens = CoderAgent(task_id=task_id, user_id=uid, tools=tools,
                                     max_iterations=settings.max_coder_iterations)

@@ -23,6 +23,7 @@ from jupyter_client.manager import AsyncKernelManager
 from ..core.config import get_settings
 from ..core.events import EventType, emit
 from ..core.logging import logger
+from .notebook import NotebookRecorder
 
 # ---------- CJK 字体缓存 ----------
 _FONT_CACHE_TTL = 86400.0   # 24 小时
@@ -235,6 +236,8 @@ class JupyterSandbox:
         self._image_seq = 0
         self._lock = asyncio.Lock()
         self._interrupt_requested: bool = False  # 用户发起的中断标志
+        self._notebook: NotebookRecorder = NotebookRecorder()
+        self._notebook_path: Path = self.work_dir / "notebook.ipynb"
 
     async def _check_paused(self) -> None:
         """若任务被暂停则阻塞，直到恢复或取消。不中断内核，仅暂停消息处理。"""
@@ -243,6 +246,11 @@ class JupyterSandbox:
             await task_manager.wait_if_paused(self.task_id)
         except Exception:
             pass
+
+    def add_phase_marker(self, label: str) -> None:
+        """在 notebook 中插入分节标题 cell（由 orchestrator 在每个阶段开始时调用）。"""
+        self._notebook.add_phase_marker(label)
+        self._notebook.flush(self._notebook_path)
 
     async def interrupt(self) -> None:
         """中断当前正在执行的代码（等价于 Jupyter 的 '■ Stop' 按钮）。"""
@@ -495,6 +503,8 @@ class JupyterSandbox:
         timeout = timeout or settings.sandbox_timeout
 
         result = ExecResult(success=True)
+        # ── Notebook 录制：记录代码 cell（在发送给 kernel 之前）────────────
+        self._notebook.record_cell(code)
         msg_id = self._kc.execute(code)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -531,10 +541,12 @@ class JupyterSandbox:
                 stream_name = content.get("name", "stdout")
                 if stream_name == "stderr":
                     result.stderr += text
+                    self._notebook.record_stderr(text)
                     if emit_events:
                         await emit(EventType.SANDBOX_STDERR, self.task_id, text=text)
                 else:
                     result.stdout += text
+                    self._notebook.record_stdout(text)
                     if emit_events:
                         await emit(EventType.SANDBOX_STDOUT, self.task_id, text=text)
 
@@ -543,15 +555,18 @@ class JupyterSandbox:
                 if "image/png" in data:
                     img_path = self._save_image(data["image/png"], "png")
                     result.images.append(str(img_path))
+                    self._notebook.record_image(data["image/png"], "image/png")
                     if emit_events:
                         await emit(EventType.SANDBOX_DISPLAY, self.task_id, image=str(img_path), kind="png")
                 elif "image/jpeg" in data:
                     img_path = self._save_image(data["image/jpeg"], "jpg")
                     result.images.append(str(img_path))
+                    self._notebook.record_image(data["image/jpeg"], "image/jpeg")
                     if emit_events:
                         await emit(EventType.SANDBOX_DISPLAY, self.task_id, image=str(img_path), kind="jpg")
                 if "text/plain" in data and mtype == "execute_result":
                     result.text_result = data["text/plain"]
+                    self._notebook.record_result(data["text/plain"])
                     if emit_events:
                         await emit(EventType.SANDBOX_RESULT, self.task_id, text=result.text_result)
 
@@ -562,6 +577,11 @@ class JupyterSandbox:
                 # 清理 ANSI 转义码，避免 LLM 收到乱码
                 result.error = _ANSI_RE.sub("", raw_err)
                 result.traceback = [_ANSI_RE.sub("", line) for line in raw_tb]
+                self._notebook.record_error(
+                    content.get("ename", "Error"),
+                    content.get("evalue", ""),
+                    raw_tb,
+                )
                 if emit_events:
                     await emit(
                         EventType.SANDBOX_STDERR,
@@ -570,6 +590,8 @@ class JupyterSandbox:
                     )
 
             elif mtype == "status" and content.get("execution_state") == "idle":
+                # cell 执行完毕：刷新 notebook（增量覆盖，保持文件始终可用）
+                self._notebook.flush(self._notebook_path)
                 break
 
         # 清除中断标志

@@ -234,6 +234,10 @@ export const api = {
     const t = tokenStore.get()
     return `/api/tasks/${id}/archive${t ? `?token=${encodeURIComponent(t)}` : ''}`
   },
+  notebookUrl: (id: string) => {
+    const t = tokenStore.get()
+    return `/api/tasks/${id}/notebook${t ? `?token=${encodeURIComponent(t)}` : ''}`
+  },
   exportPdfUrl: (id: string) => {
     const t = tokenStore.get()
     return `/api/tasks/${id}/export/pdf${t ? `?token=${encodeURIComponent(t)}` : ''}`

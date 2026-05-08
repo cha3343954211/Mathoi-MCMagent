@@ -488,6 +488,20 @@ async def get_file(task_id: str, path: str, user: User = Depends(get_current_use
 
 # ---------- 导出 ----------
 
+@router.get("/tasks/{task_id}/notebook")
+async def download_notebook(task_id: str, user: User = Depends(get_current_user)) -> Any:
+    """下载任务的 Jupyter Notebook（.ipynb），包含所有代码执行过程和输出。"""
+    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    nb_path = Path(t.work_dir) / "notebook.ipynb"
+    if not nb_path.exists():
+        raise HTTPException(404, detail="Notebook 尚未生成（任务未开始或尚无代码执行）")
+    return FileResponse(
+        nb_path,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{task_id}_notebook.ipynb"'},
+    )
+
+
 @router.get("/tasks/{task_id}/archive")
 async def download_archive(task_id: str, user: User = Depends(get_current_user)) -> Any:
     """将工作区所有文件打包为 ZIP 下载。"""
