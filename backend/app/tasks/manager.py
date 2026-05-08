@@ -69,6 +69,57 @@ class TaskManager:
         self._hitl_events: dict[str, asyncio.Event] = {}
         self._task_handles: dict[str, asyncio.Task] = {}
         self._sandboxes: dict[str, Any] = {}  # task_id -> JupyterSandbox
+        self._watchdog: Optional[asyncio.Task] = None  # 超时扫描后台任务
+
+    # ---------- Watchdog ----------
+    async def _watchdog_loop(self) -> None:
+        """每 60s 扫描一次，将超过 max_task_hours 的活跃任务强制标记为 FAILED。"""
+        from ..core.config import get_settings as _gs
+        _INTERVAL = 60.0
+        while True:
+            try:
+                await asyncio.sleep(_INTERVAL)
+                max_secs = _gs().max_task_hours * 3600
+                now = time.time()
+                for task in list(self._tasks.values()):
+                    if task.state not in (
+                        TaskState.RUNNING, TaskState.PAUSED, TaskState.AWAITING_HITL
+                    ):
+                        continue
+                    if now - task.created_at > max_secs:
+                        logger.warning(
+                            "Watchdog: task {} timed out ({:.1f}h > {:.1f}h), forcing FAILED",
+                            task.task_id, (now - task.created_at) / 3600, _gs().max_task_hours,
+                        )
+                        await self._force_timeout(task.task_id, _gs().max_task_hours)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Watchdog error (non-fatal): {}", exc)
+
+    async def _force_timeout(self, task_id: str, max_hours: float) -> None:
+        """强制终止超时任务：解除所有阻塞 → 取消 asyncio handle → 标记 FAILED。"""
+        # 解除 pause / HITL 阻塞，让协程能收到 CancelledError
+        pause_ev = self._pause_events.get(task_id)
+        if pause_ev:
+            pause_ev.set()
+        hitl_ev = self._hitl_events.get(task_id)
+        if hitl_ev:
+            hitl_ev.set()
+        # 中断 sandbox（如果有活跃 kernel）
+        sandbox = self._sandboxes.get(task_id)
+        if sandbox:
+            try:
+                await sandbox.interrupt()
+            except Exception:
+                pass
+        # 取消 asyncio 工作协程
+        handle = self._task_handles.get(task_id)
+        if handle and not handle.done():
+            handle.cancel()
+        err_msg = f"任务超时（运行超过 {max_hours:.1f}h），已强制终止"
+        await self.update_state(task_id, TaskState.FAILED, error=err_msg)
+        await emit(EventType.TASK_FAILED, task_id, error=err_msg)
 
     async def init(self) -> None:
         """从数据库恢复未结束的任务元信息（运行状态置为 cancelled，避免重启后悬挂）。"""
@@ -99,9 +150,18 @@ class TaskManager:
             logger.info("已恢复 {} 个历史任务", len(self._tasks))
         except Exception as e:
             logger.warning("任务恢复跳过: {}", e)
+        # 启动超时 Watchdog
+        self._watchdog = asyncio.create_task(self._watchdog_loop(), name="task-watchdog")
+        logger.info("Watchdog started (interval=60s)")
 
     async def close(self) -> None:
-        pass
+        if self._watchdog and not self._watchdog.done():
+            self._watchdog.cancel()
+            try:
+                await asyncio.wait_for(self._watchdog, timeout=3.0)
+            except Exception:
+                pass
+        logger.info("Watchdog stopped")
 
     # ---------- 创建 ----------
     async def create(
