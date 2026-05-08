@@ -231,14 +231,32 @@ class TaskManager:
         t = self._tasks.get(task_id)
         if not t:
             return {}
-        t.hitl_request = {"prompt": prompt, "context": context, "ts": time.time()}
+        settings = get_settings()
+        timeout_secs = settings.hitl_timeout_hours * 3600
+        deadline = time.time() + timeout_secs
+
+        t.hitl_request = {
+            "prompt": prompt, "context": context,
+            "ts": time.time(), "deadline": deadline,  # 供前端倒计时
+        }
         t.hitl_response = None
         await self.update_state(task_id, TaskState.AWAITING_HITL)
-        await emit(EventType.HITL_REQUEST, task_id, prompt=prompt, context=context)
+        await emit(EventType.HITL_REQUEST, task_id, prompt=prompt,
+                   context=context, deadline=deadline)
+
         ev = self._hitl_events[task_id]
         ev.clear()
-        await ev.wait()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout_secs)
+        except asyncio.TimeoutError:
+            logger.warning("HITL timeout after {:.1f}h | task={}", settings.hitl_timeout_hours, task_id)
+            # 超时自动 approve（继续执行，方案未改动）
+            t.hitl_response = {"action": "approve", "_auto": True, "_reason": "timeout"}
+            await emit(EventType.HITL_TIMEOUT, task_id,
+                       message=f"HITL 超时（>{settings.hitl_timeout_hours}h），自动批准继续")
+
         resp = t.hitl_response or {}
+        t.hitl_request = None
         await emit(EventType.HITL_RESOLVED, task_id, response=resp)
         await self.update_state(task_id, TaskState.RUNNING)
         return resp

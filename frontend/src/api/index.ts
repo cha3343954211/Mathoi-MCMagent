@@ -52,7 +52,7 @@ export interface Task {
   state: string; phase: string; error: string
   work_dir: string; data_files: string[]
   created_at: number; updated_at: number
-  hitl_request: { prompt: string; context: any; ts: number } | null
+  hitl_request: { prompt: string; context: any; ts: number; deadline?: number } | null
 }
 
 export interface TraceEvent {

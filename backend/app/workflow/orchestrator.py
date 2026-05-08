@@ -30,6 +30,7 @@ from ..sandbox import JupyterSandbox
 from ..llm import image_part_from_file
 from ..tasks import TaskState, task_manager
 from ..tools import build_default_registry, build_writer_registry
+from ..utils import build_data_preview
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
 _MULTIMODAL_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -85,11 +86,18 @@ async def run_workflow(task_id: str) -> None:
             await task_manager.update_state(task_id, TaskState.RUNNING, phase="modeler")
             await emit(EventType.PHASE_ENTER, task_id, phase="modeler")
 
+            # 数据预扫：提取 schema / head(5) / 缺失率，仅在有数据文件时生成
+            data_preview_md = build_data_preview(work_dir, task.data_files)
+
             def _build_modeler_input(extra_feedback: str = "") -> str:
                 base = (
                     f"# 题目结构化信息\n"
                     f"```json\n{json.dumps(questions, ensure_ascii=False, indent=2)}\n```\n\n"
                     f"# 工作区数据文件\n{data_summary}\n\n"
+                )
+                if data_preview_md:
+                    base += data_preview_md + "\n"
+                base += (
                     f"题目共 {ques_count} 个问题，请为每个问题制定详细建模方案，"
                     "并包含 EDA 数据分析方案和敏感性分析方案。"
                 )
@@ -107,8 +115,18 @@ async def run_workflow(task_id: str) -> None:
                 modeler = ModelerAgent(task_id=task_id, user_id=uid, tools=None, max_iterations=3)
                 _patch_agent_with_hitl(modeler, task_id)
                 modeling_plan = await modeler.run(_build_modeler_input(_redo_feedback))
+                # 持久化版本文件（v1 起步），便于用户 diff 查看历史
+                version_path = work_dir / f"modeling_plan_v{_redo_round + 1}.md"
+                version_path.write_text(modeling_plan, encoding="utf-8")
                 plan_path.write_text(modeling_plan, encoding="utf-8")
                 solutions = parse_modeler_sections(modeling_plan)
+
+                # 已生成的版本文件名列表（v1..vN）
+                plan_versions = [
+                    f"modeling_plan_v{i + 1}.md"
+                    for i in range(_redo_round + 1)
+                    if (work_dir / f"modeling_plan_v{i + 1}.md").exists()
+                ]
 
                 # HITL：暂停让用户审核方案
                 hitl_resp = await task_manager.request_hitl(
@@ -121,6 +139,7 @@ async def run_workflow(task_id: str) -> None:
                         "ques_count": ques_count,
                         "redo_round": _redo_round,
                         "max_redo": _MAX_REDO,
+                        "plan_versions": plan_versions,   # 供前端切换查看
                     },
                 )
                 action = hitl_resp.get("action", "approve")

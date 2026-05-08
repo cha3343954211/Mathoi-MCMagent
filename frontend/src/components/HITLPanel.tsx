@@ -14,6 +14,25 @@ function miniMd(text: string): string {
     .replace(/\n/g, '<br/>')
 }
 
+function useCountdown(deadline: number | undefined): string {
+  const [remain, setRemain] = useState('')
+  useEffect(() => {
+    if (!deadline) { setRemain(''); return }
+    const tick = () => {
+      const secs = Math.max(0, Math.floor(deadline - Date.now() / 1000))
+      if (secs === 0) { setRemain('即将自动批准'); return }
+      const h = Math.floor(secs / 3600)
+      const m = Math.floor((secs % 3600) / 60)
+      const s = secs % 60
+      setRemain(h > 0 ? `${h}h ${m}m 后自动批准` : m > 0 ? `${m}m ${s}s 后自动批准` : `${s}s 后自动批准`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [deadline])
+  return remain
+}
+
 export function HITLPanel() {
   const { current, refreshCurrent } = useStore()
   const [mode, setMode] = useState<'preview' | 'edit' | 'redo'>('preview')
@@ -26,6 +45,7 @@ export function HITLPanel() {
   const redoRound: number = req?.context?.redo_round ?? 0
   const maxRedo: number = req?.context?.max_redo ?? 2
   const canRedo = redoRound < maxRedo
+  const countdown = useCountdown(req?.deadline)
 
   // 新的 HITL 请求到来时（通过 ts 识别）重置所有状态
   useEffect(() => {
@@ -79,11 +99,35 @@ export function HITLPanel() {
             )}
           </div>
           <p className="text-xs text-amber-800 mt-1">{req.prompt}</p>
+          {/* 超时倒计时 */}
+          {countdown && (
+            <p className="text-[11px] text-amber-600 mt-1 font-mono">⏳ {countdown}</p>
+          )}
           {/* 节概览 */}
           {req.context?.sections?.length > 0 && (
             <p className="text-[11px] text-amber-700 mt-1">
               已解析节：{(req.context.sections as string[]).join(' · ')}
             </p>
+          )}
+          {/* 历史版本标签（有多稿时显示） */}
+          {((req.context?.plan_versions as string[] | undefined) ?? []).length > 1 && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              <span className="text-[10px] text-amber-600 self-center">历史稿：</span>
+              {(req.context.plan_versions as string[]).map((v: string, i: number) => (
+                <a
+                  key={v}
+                  href="#"
+                  onClick={e => {
+                    e.preventDefault()
+                    // 通知 FilesPanel 高亮版本文件（借 URL hash 传参，FilesPanel 监听）
+                    window.dispatchEvent(new CustomEvent('hitl-select-file', { detail: v }))
+                  }}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-amber-200 text-amber-800 hover:bg-amber-300"
+                >
+                  第{i + 1}稿
+                </a>
+              ))}
+            </div>
           )}
         </header>
 

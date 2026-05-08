@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Optional
 
 from sqlalchemy import select
-from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from ..core.events import EventType
 from ..core.events import emit as emit_event
@@ -21,6 +21,91 @@ from .schema import ChatMessage, ToolSpec
 
 class LLMError(RuntimeError):
     pass
+
+
+# ---------- 错误分类 ----------
+def _is_transient(exc: Exception) -> bool:
+    """只对可重试的瞬时错误重试（网络、限速、服务端 5xx）。
+    401/403/400 等致命错误立即失败，不浪费重试次数。
+    """
+    # openai SDK 具名异常
+    try:
+        from openai import (
+            RateLimitError, APITimeoutError, APIConnectionError, InternalServerError,
+        )
+        if isinstance(exc, (RateLimitError, APITimeoutError, APIConnectionError)):
+            return True
+        if isinstance(exc, InternalServerError):
+            return True
+    except ImportError:
+        pass
+    # httpx 网络层
+    try:
+        import httpx
+        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError,
+                            httpx.RemoteProtocolError, httpx.NetworkError)):
+            return True
+    except ImportError:
+        pass
+    # 通用：HTTP 状态码
+    status = getattr(exc, "status_code", None)
+    if status in (429, 500, 502, 503, 504):
+        return True
+    return False
+
+
+def _retry_after_seconds(exc: Exception) -> float:
+    """从 429 响应中提取 Retry-After 头（秒），不存在则返回 0。"""
+    try:
+        headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
+        val = headers.get("retry-after") or headers.get("Retry-After") or ""
+        if val:
+            return max(0.0, float(val))
+    except Exception:
+        pass
+    return 0.0
+
+
+# ---------- 简单熔断器 ----------
+# key: (user_id, agent)  value: (fail_count, window_start, open_until)
+_circuit_breaker: dict[tuple[int, str], tuple[int, float, float]] = {}
+_CB_THRESHOLD = 3       # 窗口内连续失败 N 次触发
+_CB_WINDOW = 60.0       # 统计窗口（秒）
+_CB_OPEN_SECS = 60.0    # 熔断打开后的冷却时长（秒）
+
+
+def _cb_check(user_id: int, agent: str) -> None:
+    """如果熔断器处于 open 状态，直接抛出 LLMError（不发起 LLM 请求）。"""
+    import time
+    key = (user_id, agent)
+    state = _circuit_breaker.get(key)
+    if not state:
+        return
+    _, _, open_until = state
+    if open_until > time.time():
+        remaining = int(open_until - time.time())
+        raise LLMError(f"LLM 熔断中（{agent}），请 {remaining}s 后重试。")
+
+
+def _cb_record(user_id: int, agent: str, success: bool) -> None:
+    """记录一次调用结果，更新熔断器状态。"""
+    import time
+    key = (user_id, agent)
+    if success:
+        _circuit_breaker.pop(key, None)
+        return
+    now = time.time()
+    state = _circuit_breaker.get(key, (0, now, 0.0))
+    count, window_start, open_until = state
+    # 窗口过期则重置
+    if now - window_start > _CB_WINDOW:
+        count, window_start = 0, now
+    count += 1
+    if count >= _CB_THRESHOLD:
+        logger.warning("LLM 熔断触发: agent={} user={} fails={}", agent, user_id, count)
+        _circuit_breaker[key] = (count, window_start, now + _CB_OPEN_SECS)
+    else:
+        _circuit_breaker[key] = (count, window_start, 0.0)
 
 
 async def _get_user(user_id: int) -> Optional[User]:
@@ -107,16 +192,30 @@ async def chat_for_user(
     if response_format:
         params["response_format"] = response_format
 
+    # 熔断器检查（open 状态直接抛出，不发 LLM 请求）
+    _cb_check(user_id, agent)
+
     last_err: Optional[Exception] = None
     resp: dict[str, Any] = {}
     # task_id 存在时走内部流式调用，发射 stream_chunk 事件
     use_stream = bool(task_id)
+    _attempt_no = 0
+
     async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        reraise=True,   # 耗尽重试后真正抛出异常
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        retry=retry_if_exception(_is_transient),   # 只重试瞬时错误
+        reraise=True,
     ):
         with attempt:
+            _attempt_no += 1
+            # 429 时追加 Retry-After 等待（在 tenacity 退避之外）
+            if last_err is not None and _attempt_no > 1:
+                ra = _retry_after_seconds(last_err)
+                if ra > 0:
+                    logger.info("LLM 429 Retry-After={}s | agent={}", ra, agent)
+                    import asyncio as _aio
+                    await _aio.sleep(min(ra, 120))
             try:
                 if cfg.backend == "litellm":
                     resp = await (
@@ -130,15 +229,21 @@ async def chat_for_user(
                     )
             except Exception as e:
                 last_err = e
+                if _attempt_no > 1:
+                    logger.warning("LLM retry {}/{} failed: {} | agent={} user={}",
+                                   _attempt_no, 4, type(e).__name__, agent, user_id)
                 raise
+
     if not resp:
         err = f"LLM 调用失败：{last_err}"
+        _cb_record(user_id, agent, success=False)
         await record_usage(
             user_id=user_id, task_id=task_id, agent=agent, backend=cfg.backend,
             model=cfg.model, is_default=cfg.is_default, ok=False, error=str(last_err),
         )
         raise LLMError(err)
 
+    _cb_record(user_id, agent, success=True)
     msg = resp["choices"][0]["message"]
     usage = resp.get("usage") or {}
     pt = int(usage.get("prompt_tokens", 0) or 0)

@@ -49,6 +49,7 @@ class EventType(str, Enum):
     # HITL
     HITL_REQUEST = "hitl.request"            # 请求人工介入
     HITL_RESOLVED = "hitl.resolved"          # 已解决
+    HITL_TIMEOUT = "hitl.timeout"            # 超时自动批准
 
 
 @dataclass

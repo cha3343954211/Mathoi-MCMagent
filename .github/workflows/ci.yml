@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+
+jobs:
+  # ── 后端：ruff lint + mypy 类型检查 ──────────────────────────
+  backend:
+    name: Backend (ruff + mypy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install ruff mypy
+          # 仅安装 type stubs + 核心依赖，不启动数据库
+          pip install \
+            fastapi pydantic pydantic-settings sqlalchemy aiosqlite \
+            loguru tenacity httpx openai \
+            types-requests types-python-dateutil
+
+      - name: ruff check
+        run: ruff check app/ --select E,F,W,I --ignore E501
+
+      - name: mypy (non-strict)
+        run: |
+          mypy app/ \
+            --ignore-missing-imports \
+            --no-strict-optional \
+            --follow-imports=skip \
+            --exclude "app/api/__pycache__|app/db/__pycache__" \
+            || true   # 暂以警告模式运行，不阻断 PR（逐步提升后可去掉 || true）
+
+  # ── 前端：TypeScript 类型检查 ─────────────────────────────────
+  frontend:
+    name: Frontend (tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: tsc --noEmit
+        run: npx tsc --noEmit
