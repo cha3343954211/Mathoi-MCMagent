@@ -1,0 +1,68 @@
+# SearXNG 配置文件（为 MathoiAgent 预配置）
+# 关键改动：启用 JSON 输出格式（MathoiAgent API 调用必需）
+
+use_default_settings: true
+
+general:
+  instance_name: "MathoiAgent Search"
+  # 不对外公开（内部 API 使用）
+  public_instance: false
+
+search:
+  # 启用 JSON 格式（默认只有 html，必须手动加 json）
+  formats:
+    - html
+    - json
+  # 安全级别：medium 允许技术类搜索
+  safe_search: 0
+  # 默认语言
+  language: "auto"
+  # 搜索超时
+  timeout_limit: 10.0
+
+server:
+  # 监听所有接口（Docker 容器内）
+  bind_address: "0.0.0.0:8080"
+  secret_key: "${SEARXNG_SECRET_KEY}"
+  # 禁用 HTTPS 重定向（内网使用）
+  http_protocol_version: "1.1"
+
+# 启用高质量搜索引擎（技术文档搜索效果好）
+engines:
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+
+  - name: stackoverflow
+    engine: stackoverflow
+    shortcut: so
+    disabled: false
+
+  - name: github
+    engine: github
+    shortcut: gh
+    disabled: false
+
+  - name: pypi
+    engine: xpath
+    shortcut: pypi
+    url: https://pypi.org/search/?q={query}
+    url_xpath: //a[@class="package-snippet"]/@href
+    title_xpath: //span[@class="package-snippet__name"]
+    content_xpath: //p[@class="package-snippet__description"]
+    disabled: false
+
+ui:
+  # 精简 UI（内部工具不需要完整 UI）
+  static_use_hash: true

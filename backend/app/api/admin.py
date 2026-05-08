@@ -594,32 +594,52 @@ class SearchConfigUpdate(BaseModel):
     search_max_results: int = Field(6, ge=1, le=20)
 
 
-@router.get("/search-config", response_model=SearchConfigOut)
-async def get_search_config():
-    """读取当前联网搜索配置。"""
-    from ..core.config import settings
+_SEARCH_KEYS = {"search_provider", "searxng_base_url", "searxng_timeout", "search_max_results"}
+
+
+async def _read_search_cfg(session: AsyncSession) -> SearchConfigOut:
+    """DB 优先，回退 env 默认值。"""
+    from ..core.config import settings as _s
+    rows = (await session.execute(
+        select(SystemSetting).where(SystemSetting.key.in_(_SEARCH_KEYS))
+    )).scalars().all()
+    db = {r.key: r.value for r in rows}
     return SearchConfigOut(
-        search_provider=settings.search_provider,
-        searxng_base_url=settings.searxng_base_url,
-        searxng_timeout=settings.searxng_timeout,
-        search_max_results=settings.search_max_results,
+        search_provider=db.get("search_provider") or _s.search_provider,
+        searxng_base_url=db.get("searxng_base_url") or _s.searxng_base_url,
+        searxng_timeout=float(db.get("searxng_timeout") or _s.searxng_timeout),
+        search_max_results=int(db.get("search_max_results") or _s.search_max_results),
     )
+
+
+@router.get("/search-config", response_model=SearchConfigOut)
+async def get_search_config(session: AsyncSession = Depends(get_session)):
+    """读取搜索配置（DB 覆盖 env）。"""
+    return await _read_search_cfg(session)
 
 
 @router.put("/search-config", response_model=SearchConfigOut)
-async def update_search_config(body: SearchConfigUpdate):
-    """动态更新联网搜索配置（写入 settings 对象，重启前有效）。"""
-    from ..core.config import settings
-    settings.search_provider = body.search_provider       # type: ignore[assignment]
-    settings.searxng_base_url = body.searxng_base_url     # type: ignore[assignment]
-    settings.searxng_timeout = body.searxng_timeout       # type: ignore[assignment]
-    settings.search_max_results = body.search_max_results # type: ignore[assignment]
-    return SearchConfigOut(
-        search_provider=settings.search_provider,
-        searxng_base_url=settings.searxng_base_url,
-        searxng_timeout=settings.searxng_timeout,
-        search_max_results=settings.search_max_results,
-    )
+async def update_search_config(
+    body: SearchConfigUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """持久化搜索配置到 DB（重启后仍生效）。"""
+    updates = {
+        "search_provider":   body.search_provider,
+        "searxng_base_url":  body.searxng_base_url,
+        "searxng_timeout":   str(body.searxng_timeout),
+        "search_max_results": str(body.search_max_results),
+    }
+    for key, value in updates.items():
+        row = (await session.execute(
+            select(SystemSetting).where(SystemSetting.key == key)
+        )).scalar_one_or_none()
+        if row:
+            row.value = value
+        else:
+            session.add(SystemSetting(key=key, value=value))
+    await session.commit()
+    return await _read_search_cfg(session)
 
 
 @router.post("/search-config/test")

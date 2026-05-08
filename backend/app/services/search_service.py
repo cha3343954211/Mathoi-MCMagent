@@ -77,6 +77,22 @@ async def _search_duckduckgo(
 
 # ── 公共入口 ──────────────────────────────────────────────────────────────────
 
+async def _load_db_config() -> dict[str, str]:
+    """从 DB 读取搜索配置（优先于 env），失败时返回空 dict。"""
+    try:
+        from ..db import AsyncSessionLocal, SystemSetting
+        from sqlalchemy import select
+        _KEYS = {"search_provider", "searxng_base_url", "searxng_timeout", "search_max_results"}
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(SystemSetting).where(SystemSetting.key.in_(_KEYS))
+            )).scalars().all()
+            return {r.key: r.value for r in rows}
+    except Exception as exc:
+        logger.debug("search_service: DB config load failed ({}), use env", exc)
+        return {}
+
+
 async def search_web(
     query: str,
     max_results: int | None = None,
@@ -85,20 +101,22 @@ async def search_web(
     """
     统一搜索入口。
 
-    provider="auto" 时优先读 settings.search_provider。
+    优先级：DB 配置 > env 配置。
     SearXNG 失败自动 fallback 到 DuckDuckGo。
     """
-    n = max_results or settings.search_max_results
+    db = await _load_db_config()
 
-    effective = settings.search_provider if provider == "auto" else provider
+    effective_provider = db.get("search_provider") or settings.search_provider
+    effective_base_url  = db.get("searxng_base_url") or settings.searxng_base_url
+    effective_timeout   = float(db.get("searxng_timeout") or settings.searxng_timeout)
+    n = max_results or int(db.get("search_max_results") or settings.search_max_results)
 
-    if effective == "searxng" and settings.searxng_base_url:
+    if provider != "auto":
+        effective_provider = provider
+
+    if effective_provider == "searxng" and effective_base_url:
         try:
-            results = await _search_searxng(
-                query, n,
-                settings.searxng_base_url,
-                settings.searxng_timeout,
-            )
+            results = await _search_searxng(query, n, effective_base_url, effective_timeout)
             logger.debug("SearXNG returned {} results for: {}", len(results), query)
             return results
         except Exception as exc:

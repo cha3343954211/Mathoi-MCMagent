@@ -1,0 +1,15 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    # 仅监听本机，不暴露公网
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # 挂载自定义配置（含 JSON 格式支持）
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - BASE_URL=http://127.0.0.1:8080/
+      - INSTANCE_NAME=MathoiAgent Search
+      - SEARXNG_SECRET_KEY=change-me-to-a-random-string

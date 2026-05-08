@@ -964,28 +964,37 @@ function SearchConfigTab() {
       </div>
 
       {/* 部署说明 */}
-      <section className="text-xs text-ink-500 space-y-1.5 leading-relaxed border-t border-ink-100 pt-4">
+      <section className="text-xs text-ink-500 space-y-2 leading-relaxed border-t border-ink-100 pt-4">
         <p className="font-medium text-ink-700">SearXNG Docker 快速部署（Ubuntu 服务器）</p>
+
+        {/* 重要提示：JSON 格式 */}
+        <div className="flex gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800">
+          <span className="text-base leading-none mt-0.5">⚠️</span>
+          <div>
+            <p className="font-medium">必须启用 JSON 格式</p>
+            <p className="mt-0.5 text-amber-700">SearXNG 默认只输出 HTML，需在 <code className="bg-amber-100 px-1 rounded">settings.yml</code> 中加入 <code className="bg-amber-100 px-1 rounded">- json</code>，否则 API 调用返回 400 错误。项目已提供预配置文件，推荐使用下方命令。</p>
+          </div>
+        </div>
+
         <pre className="bg-ink-50 rounded p-3 overflow-x-auto text-[11px] text-ink-700 leading-loose">{
-`mkdir -p /opt/searxng && cd /opt/searxng
+`# 使用项目内置预配置（已启用 JSON 格式 + 技术搜索引擎）
+cd deploy/searxng
 
-cat > docker-compose.yml << 'EOF'
-services:
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8080:8080"
-    environment:
-      - BASE_URL=http://127.0.0.1:8080/
-      - INSTANCE_NAME=MathoiAgent Search
-EOF
+# 修改 secret key（重要）
+sed -i 's/change-me-to-a-random-string/'$(openssl rand -hex 32)'/' docker-compose.yml
 
-docker compose up -d`
+# 启动
+docker compose up -d
+
+# 验证 JSON 接口
+curl "http://127.0.0.1:8080/search?q=python&format=json" | head -c 200`
         }</pre>
-        <p>部署完成后在上方填写 <code className="bg-ink-100 px-1 rounded">http://127.0.0.1:8080</code>，点击「测试连接」验证。</p>
-        <p className="text-ink-400">SearXNG 内存占用约 150-300 MB，对 8C8G 服务器影响极小。</p>
+        <p>
+          部署完成后在上方填写{' '}
+          <code className="bg-ink-100 px-1 rounded">http://127.0.0.1:8080</code>
+          ，点击「测试连接」，成功后保存即可。配置持久化到数据库，重启后仍生效。
+        </p>
+        <p className="text-ink-400">SearXNG 内存占用约 150–300 MB，对 8C8G 服务器影响极小。</p>
       </section>
     </div>
   )
