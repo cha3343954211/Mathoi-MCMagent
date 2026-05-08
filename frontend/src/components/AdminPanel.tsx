@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, AdminTask, AdminUser, ModelUsage, Overview, Stats, SystemSettings, TaskFileStat, UserFileStat, UserUsage } from '../api'
 import { AdminModelConfig } from './ModelConfig'
 
-type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files' | 'settings'
+type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files' | 'settings' | 'template'
 
 export function AdminPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>('overview')
@@ -16,7 +16,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
             {([
               ['overview', '概览'], ['users', '用户'], ['tasks', '任务'],
               ['models', '默认模型'], ['usage', '用量'], ['files', '文件管理'],
-              ['settings', '设置']
+              ['settings', '设置'], ['template', '论文模板']
             ] as [Tab, string][]).map(([k, v]) => (
               <button key={k} onClick={() => setTab(k)}
                 className={`px-3 py-1 rounded ${tab === k ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{v}</button>
@@ -33,6 +33,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           {tab === 'usage' && <UsageTab />}
           {tab === 'files' && <FilesTab />}
           {tab === 'settings' && <SettingsTab />}
+          {tab === 'template' && <PaperTemplateTab />}
         </div>
       </div>
     </div>
@@ -555,6 +556,80 @@ function UserUsageDialog({ userId, onClose }: { userId: number; onClose: () => v
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+
+// ---------- 论文模板编辑器 ----------
+function PaperTemplateTab() {
+  const [content, setContent] = useState('')
+  const [original, setOriginal] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
+  useEffect(() => {
+    api.adminGetPaperTemplate()
+      .then(r => { setContent(r.content); setOriginal(r.content) })
+      .catch(() => setMsg({ type: 'err', text: '加载失败' }))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const onSave = async () => {
+    setSaving(true); setMsg(null)
+    try {
+      const r = await api.adminUpdatePaperTemplate(content)
+      setOriginal(r.content)
+      setMsg({ type: 'ok', text: `已保存（${r.size} 字节）` })
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.message || '保存失败' })
+    } finally { setSaving(false) }
+  }
+
+  const onReset = () => { setContent(original); setMsg(null) }
+
+  if (loading) return <p className="p-6 text-xs text-ink-400">加载中…</p>
+
+  return (
+    <div className="p-5 flex flex-col gap-4 h-full">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">论文章节写作模板</h3>
+          <p className="text-xs text-ink-500 mt-1 leading-relaxed">
+            TOML 格式，key 对应章节（firstPage / RepeatQues / analysisQues / modelAssumption / symbol / eda / ques1…N / sensitivity_analysis / judge）。
+            修改后下次任务立即生效，服务端自动备份 .toml.bak。
+          </p>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <button
+            onClick={onReset}
+            disabled={content === original}
+            className="px-3 py-1.5 border border-ink-200 rounded text-xs text-ink-600 hover:bg-ink-50 disabled:opacity-40">
+            撤销修改
+          </button>
+          <button
+            onClick={onSave}
+            disabled={saving || content === original || !content.trim()}
+            className="px-4 py-1.5 bg-ink-800 text-white rounded text-xs hover:bg-ink-700 disabled:bg-ink-300 disabled:cursor-not-allowed">
+            {saving ? '保存中…' : '保存'}
+          </button>
+        </div>
+      </div>
+
+      {msg && (
+        <p className={`text-xs px-3 py-2 rounded ${msg.type === 'ok' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+          {msg.text}
+        </p>
+      )}
+
+      <textarea
+        value={content}
+        onChange={e => setContent(e.target.value)}
+        spellCheck={false}
+        className="flex-1 font-mono text-[12px] leading-relaxed border border-ink-200 rounded p-3 resize-none focus:outline-none focus:border-ink-400 bg-ink-50/50 min-h-[400px]"
+        placeholder="TOML 格式模板内容…"
+      />
     </div>
   )
 }

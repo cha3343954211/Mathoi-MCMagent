@@ -327,6 +327,14 @@ export const api = {
       method: 'PUT', body: JSON.stringify(body),
     }),
 
+  // 论文模板
+  adminGetPaperTemplate: () =>
+    request<{ content: string; size: number }>('/api/admin/paper-template'),
+  adminUpdatePaperTemplate: (content: string) =>
+    request<{ content: string; size: number }>('/api/admin/paper-template', {
+      method: 'PUT', body: JSON.stringify({ content }),
+    }),
+
   // WebSocket
   openWS: (id: string, onEvent: (e: TraceEvent) => void, onStatus?: (s: WsStatus) => void) => {
     return new ReconnectingWS(id, onEvent, onStatus)

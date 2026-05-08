@@ -572,3 +572,48 @@ async def update_system_settings(body: SettingsUpdate, session: AsyncSession = D
         from ..services.usage_service import invalidate_quota_cache
         invalidate_quota_cache()
     return await get_system_settings(session)
+
+
+# ---------- 论文模板 ----------
+_TEMPLATE_PATH = Path(__file__).parent.parent / "config" / "md_template.toml"
+
+
+class PaperTemplateOut(BaseModel):
+    content: str
+    size: int
+
+
+class PaperTemplateUpdate(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+@router.get("/paper-template", response_model=PaperTemplateOut)
+async def get_paper_template():
+    """读取论文章节写作模板（TOML 格式）。"""
+    if not _TEMPLATE_PATH.exists():
+        raise HTTPException(404, "模板文件不存在")
+    content = _TEMPLATE_PATH.read_text(encoding="utf-8")
+    return PaperTemplateOut(content=content, size=len(content))
+
+
+@router.put("/paper-template", response_model=PaperTemplateOut)
+async def update_paper_template(body: PaperTemplateUpdate):
+    """覆写论文章节写作模板。校验为合法 TOML 后才写入磁盘。"""
+    # 校验 TOML 合法性
+    try:
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError:
+                raise HTTPException(500, "服务端缺少 tomllib/tomli，无法校验 TOML")
+        tomllib.loads(body.content)
+    except Exception as e:
+        raise HTTPException(422, f"TOML 格式错误：{e}")
+    # 写入前备份原文件
+    if _TEMPLATE_PATH.exists():
+        backup = _TEMPLATE_PATH.with_suffix(".toml.bak")
+        shutil.copy2(_TEMPLATE_PATH, backup)
+    _TEMPLATE_PATH.write_text(body.content, encoding="utf-8")
+    return PaperTemplateOut(content=body.content, size=len(body.content))
