@@ -578,6 +578,59 @@ async def update_system_settings(body: SettingsUpdate, session: AsyncSession = D
 _TEMPLATE_PATH = Path(__file__).parent.parent / "config" / "md_template.toml"
 
 
+# ─────────────────────────── 搜索配置 ────────────────────────────────────────
+
+class SearchConfigOut(BaseModel):
+    search_provider: str
+    searxng_base_url: str
+    searxng_timeout: float
+    search_max_results: int
+
+
+class SearchConfigUpdate(BaseModel):
+    search_provider: str = Field(..., pattern="^(duckduckgo|searxng)$")
+    searxng_base_url: str = ""
+    searxng_timeout: float = Field(8.0, ge=1, le=60)
+    search_max_results: int = Field(6, ge=1, le=20)
+
+
+@router.get("/search-config", response_model=SearchConfigOut)
+async def get_search_config():
+    """读取当前联网搜索配置。"""
+    from ..core.config import settings
+    return SearchConfigOut(
+        search_provider=settings.search_provider,
+        searxng_base_url=settings.searxng_base_url,
+        searxng_timeout=settings.searxng_timeout,
+        search_max_results=settings.search_max_results,
+    )
+
+
+@router.put("/search-config", response_model=SearchConfigOut)
+async def update_search_config(body: SearchConfigUpdate):
+    """动态更新联网搜索配置（写入 settings 对象，重启前有效）。"""
+    from ..core.config import settings
+    settings.search_provider = body.search_provider       # type: ignore[assignment]
+    settings.searxng_base_url = body.searxng_base_url     # type: ignore[assignment]
+    settings.searxng_timeout = body.searxng_timeout       # type: ignore[assignment]
+    settings.search_max_results = body.search_max_results # type: ignore[assignment]
+    return SearchConfigOut(
+        search_provider=settings.search_provider,
+        searxng_base_url=settings.searxng_base_url,
+        searxng_timeout=settings.searxng_timeout,
+        search_max_results=settings.search_max_results,
+    )
+
+
+@router.post("/search-config/test")
+async def test_search_config(body: SearchConfigUpdate):
+    """测试 SearXNG 连通性。"""
+    from ..services.search_service import test_searxng
+    if body.search_provider != "searxng" or not body.searxng_base_url:
+        return {"ok": False, "error": "provider 非 searxng 或 base_url 为空"}
+    return await test_searxng(body.searxng_base_url, body.searxng_timeout)
+
+
 class PaperTemplateOut(BaseModel):
     content: str
     size: int

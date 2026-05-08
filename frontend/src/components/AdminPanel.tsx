@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { api, AdminTask, AdminUser, ModelUsage, Overview, Stats, SystemSettings, TaskFileStat, UserFileStat, UserUsage } from '../api'
+import { api, AdminTask, AdminUser, ModelUsage, Overview, SearchConfig, Stats, SystemSettings, TaskFileStat, UserFileStat, UserUsage } from '../api'
 import { AdminModelConfig } from './ModelConfig'
 
-type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files' | 'settings' | 'template'
+type Tab = 'overview' | 'users' | 'tasks' | 'models' | 'usage' | 'files' | 'settings' | 'template' | 'search'
 
 export function AdminPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>('overview')
@@ -16,7 +16,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
             {([
               ['overview', '概览'], ['users', '用户'], ['tasks', '任务'],
               ['models', '默认模型'], ['usage', '用量'], ['files', '文件管理'],
-              ['settings', '设置'], ['template', '论文模板']
+              ['settings', '设置'], ['template', '论文模板'], ['search', '联网搜索'],
             ] as [Tab, string][]).map(([k, v]) => (
               <button key={k} onClick={() => setTab(k)}
                 className={`px-3 py-1 rounded ${tab === k ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{v}</button>
@@ -34,6 +34,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           {tab === 'files' && <FilesTab />}
           {tab === 'settings' && <SettingsTab />}
           {tab === 'template' && <PaperTemplateTab />}
+          {tab === 'search' && <SearchConfigTab />}
         </div>
       </div>
     </div>
@@ -800,6 +801,191 @@ function SettingsTab() {
           </li>
           <li>未配置时不会报错，Writer 将跳过文献检索环节继续写作。</li>
         </ul>
+      </section>
+    </div>
+  )
+}
+
+// ─────────────────────────── 联网搜索配置 ────────────────────────────────────
+function SearchConfigTab() {
+  const DEFAULT: SearchConfig = {
+    search_provider: 'duckduckgo',
+    searxng_base_url: '',
+    searxng_timeout: 8,
+    search_max_results: 6,
+  }
+  const [cfg, setCfg] = useState<SearchConfig>(DEFAULT)
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; found?: number; error?: string } | null>(null)
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    api.adminGetSearchConfig().then(c => { setCfg(c); setDirty(false) }).catch(() => {})
+  }, [])
+
+  const update = (patch: Partial<SearchConfig>) => {
+    setCfg(prev => ({ ...prev, ...patch }))
+    setDirty(true)
+    setTestResult(null)
+    setMsg('')
+  }
+
+  const save = async () => {
+    setSaving(true); setMsg('')
+    try {
+      await api.adminUpdateSearchConfig(cfg)
+      setDirty(false)
+      setMsg('✓ 已保存（重启后永久生效，当前实例立即生效）')
+    } catch (e: any) {
+      setMsg(`✗ 保存失败: ${e.message ?? e}`)
+    } finally { setSaving(false) }
+  }
+
+  const test = async () => {
+    setTesting(true); setTestResult(null); setMsg('')
+    try {
+      const res = await api.adminTestSearch(cfg)
+      setTestResult(res)
+    } catch (e: any) {
+      setTestResult({ ok: false, error: e.message ?? String(e) })
+    } finally { setTesting(false) }
+  }
+
+  return (
+    <div className="p-6 max-w-2xl space-y-6">
+      <h3 className="text-sm font-semibold">联网搜索配置</h3>
+
+      {/* 搜索引擎选择 */}
+      <section className="space-y-3">
+        <label className="text-xs font-medium text-ink-600">搜索引擎</label>
+        <div className="flex gap-3">
+          {(['duckduckgo', 'searxng'] as const).map(p => (
+            <label key={p}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border cursor-pointer text-sm
+                ${cfg.search_provider === p
+                  ? 'border-blue-500 bg-blue-50 text-blue-700'
+                  : 'border-ink-200 text-ink-600 hover:border-ink-300'}`}
+            >
+              <input
+                type="radio" name="provider" value={p}
+                checked={cfg.search_provider === p}
+                onChange={() => update({ search_provider: p })}
+                className="hidden"
+              />
+              <span className={`w-3 h-3 rounded-full border-2 flex-shrink-0
+                ${cfg.search_provider === p ? 'border-blue-500 bg-blue-500' : 'border-ink-300'}`} />
+              {p === 'duckduckgo' ? 'DuckDuckGo（免费，无需配置）' : 'SearXNG（自建，推荐）'}
+            </label>
+          ))}
+        </div>
+      </section>
+
+      {/* SearXNG 专属配置 */}
+      {cfg.search_provider === 'searxng' && (
+        <section className="space-y-4 p-4 bg-ink-50 rounded-lg border border-ink-200">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-ink-600">SearXNG 地址</label>
+            <input
+              type="url"
+              value={cfg.searxng_base_url}
+              onChange={e => update({ searxng_base_url: e.target.value })}
+              placeholder="http://127.0.0.1:8080"
+              className="w-full text-sm px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:border-blue-400"
+            />
+            <p className="text-[11px] text-ink-400">服务器本地部署时填 http://127.0.0.1:8080，不含路径</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-ink-600">请求超时（秒）</label>
+              <input
+                type="number" min={1} max={60}
+                value={cfg.searxng_timeout}
+                onChange={e => update({ searxng_timeout: Number(e.target.value) })}
+                className="w-full text-sm px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:border-blue-400"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-ink-600">每次返回条数</label>
+              <input
+                type="number" min={1} max={20}
+                value={cfg.search_max_results}
+                onChange={e => update({ search_max_results: Number(e.target.value) })}
+                className="w-full text-sm px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:border-blue-400"
+              />
+            </div>
+          </div>
+
+          {/* 连通性测试 */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={test} disabled={testing || !cfg.searxng_base_url}
+              className="px-4 py-1.5 text-xs rounded-lg border border-ink-300
+                         hover:bg-ink-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+            {testResult && (
+              <span className={`text-xs font-medium ${testResult.ok ? 'text-green-600' : 'text-red-500'}`}>
+                {testResult.ok
+                  ? `✓ 连通，返回 ${testResult.found} 条结果`
+                  : `✗ ${testResult.error}`}
+              </span>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* DuckDuckGo 下的返回条数 */}
+      {cfg.search_provider === 'duckduckgo' && (
+        <section className="space-y-1.5">
+          <label className="text-xs font-medium text-ink-600">每次返回条数</label>
+          <input
+            type="number" min={1} max={10}
+            value={cfg.search_max_results}
+            onChange={e => update({ search_max_results: Number(e.target.value) })}
+            className="w-40 text-sm px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:border-blue-400"
+          />
+        </section>
+      )}
+
+      {/* 保存 */}
+      <div className="flex items-center gap-4 pt-2">
+        <button
+          onClick={save} disabled={!dirty || saving}
+          className="px-5 py-2 text-sm rounded-lg bg-blue-600 text-white
+                     hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {saving ? '保存中…' : '保存配置'}
+        </button>
+        {msg && <span className={`text-xs ${msg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{msg}</span>}
+      </div>
+
+      {/* 部署说明 */}
+      <section className="text-xs text-ink-500 space-y-1.5 leading-relaxed border-t border-ink-100 pt-4">
+        <p className="font-medium text-ink-700">SearXNG Docker 快速部署（Ubuntu 服务器）</p>
+        <pre className="bg-ink-50 rounded p-3 overflow-x-auto text-[11px] text-ink-700 leading-loose">{
+`mkdir -p /opt/searxng && cd /opt/searxng
+
+cat > docker-compose.yml << 'EOF'
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - BASE_URL=http://127.0.0.1:8080/
+      - INSTANCE_NAME=MathoiAgent Search
+EOF
+
+docker compose up -d`
+        }</pre>
+        <p>部署完成后在上方填写 <code className="bg-ink-100 px-1 rounded">http://127.0.0.1:8080</code>，点击「测试连接」验证。</p>
+        <p className="text-ink-400">SearXNG 内存占用约 150-300 MB，对 8C8G 服务器影响极小。</p>
       </section>
     </div>
   )

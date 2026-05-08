@@ -141,45 +141,32 @@ def build_default_registry(sandbox: JupyterSandbox, work_dir: Path) -> ToolRegis
         )
     )
 
-    # ---- web_search（DuckDuckGo，零成本）----
+    # ---- web_search（SearXNG 优先，fallback DuckDuckGo）----
     async def web_search(query: str, max_results: int = 6) -> dict[str, Any]:
-        """用 DuckDuckGo 搜索技术文档、库 API、算法实现参考。"""
-        import asyncio
+        """联网搜索技术文档、库 API、算法实现参考。"""
+        from ..services.search_service import search_web
+
+        n = max(1, min(max_results, 10))
         try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            return {"error": "duckduckgo-search 未安装，请 pip install duckduckgo-search"}
-
-        max_results = max(1, min(max_results, 10))
-
-        def _sync_search() -> list[dict]:
-            with DDGS() as ddgs:
-                return list(ddgs.text(query, max_results=max_results))
-
-        try:
-            results = await asyncio.get_event_loop().run_in_executor(None, _sync_search)
+            results = await search_web(query, max_results=n)
         except Exception as e:
             return {"error": f"搜索失败: {e}", "results": []}
 
         if not results:
             return {"found": 0, "results": [], "note": "未找到相关结果"}
 
-        formatted = [
-            {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")[:300]}
-            for r in results
-        ]
         return {
-            "found": len(formatted),
-            "results": formatted,
-            "note": "已返回搜索结果，请参考其中的文档/示例，不要直接复制代码，需结合实际数据调整。",
+            "found": len(results),
+            "results": [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in results],
+            "note": "已返回搜索结果，请参考文档/示例，需结合实际数据调整，勿直接复制。",
         }
 
     reg.register(Tool(
         spec=ToolSpec(
             name="web_search",
             description=(
-                "用 DuckDuckGo 搜索网页，适合查找：Python 库的 API 文档、"
-                "特定函数用法示例、算法实现参考、报错信息解决方案。"
+                "联网搜索（SearXNG 优先，fallback DuckDuckGo），适合查找："
+                "Python 库的 API 文档、特定函数用法示例、算法实现参考、报错信息解决方案。"
                 "示例：web_search('scipy.optimize.minimize SLSQP constraints example')。"
                 "注意：不用于学术文献（用 search_papers/search_arxiv），"
                 "不用于通用知识（直接推理），仅在遇到具体 API 不确定时调用。"

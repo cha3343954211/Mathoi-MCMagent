@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     # OpenAlex 学术搜索（Writer 引用文献用）
     openalex_email: str = ""   # polite pool 必填，空则跳过文献搜索
 
+    # 联网搜索（Coder web_search 工具）
+    search_provider: Literal["duckduckgo", "searxng"] = "duckduckgo"
+    searxng_base_url: str = ""          # e.g. http://127.0.0.1:8080
+    searxng_timeout: float = 8.0        # 单次请求超时秒数
+    search_max_results: int = 6         # 默认返回条数
+
     # ---------- 派生方法 ----------
     @property
     def cors_origin_list(self) -> list[str]:

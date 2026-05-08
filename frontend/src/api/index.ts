@@ -168,6 +168,13 @@ export interface SystemSettings {
   daily_token_quota_source: string // 'db' | 'env'
 }
 
+export interface SearchConfig {
+  search_provider: 'duckduckgo' | 'searxng'
+  searxng_base_url: string
+  searxng_timeout: number
+  search_max_results: number
+}
+
 export interface AgentUsageStat {
   calls: number; prompt_tokens: number; completion_tokens: number
   total_tokens: number; cost_usd: number; model: string
@@ -341,6 +348,18 @@ export const api = {
   adminUpdatePaperTemplate: (content: string) =>
     request<{ content: string; size: number }>('/api/admin/paper-template', {
       method: 'PUT', body: JSON.stringify({ content }),
+    }),
+
+  // 联网搜索配置
+  adminGetSearchConfig: () =>
+    request<SearchConfig>('/api/admin/search-config'),
+  adminUpdateSearchConfig: (body: SearchConfig) =>
+    request<SearchConfig>('/api/admin/search-config', {
+      method: 'PUT', body: JSON.stringify(body),
+    }),
+  adminTestSearch: (body: SearchConfig) =>
+    request<{ ok: boolean; found?: number; error?: string }>('/api/admin/search-config/test', {
+      method: 'POST', body: JSON.stringify(body),
     }),
 
   // WebSocket
