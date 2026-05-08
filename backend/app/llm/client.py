@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator, Optional
 from sqlalchemy import select
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
+from ..core.config import get_settings
 from ..core.events import EventType
 from ..core.events import emit as emit_event
 from ..core.logging import logger
