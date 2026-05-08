@@ -70,6 +70,8 @@ class TaskManager:
         self._task_handles: dict[str, asyncio.Task] = {}
         self._sandboxes: dict[str, Any] = {}  # task_id -> JupyterSandbox
         self._watchdog: Optional[asyncio.Task] = None  # 超时扫描后台任务
+        # get_or_load 并发控制：同 task_id 同一时刻只允许一个请求查 DB
+        self._load_locks: dict[str, asyncio.Lock] = {}
 
     # ---------- Watchdog ----------
     async def _watchdog_loop(self) -> None:
@@ -122,11 +124,32 @@ class TaskManager:
         await emit(EventType.TASK_FAILED, task_id, error=err_msg)
 
     async def init(self) -> None:
-        """从数据库恢复未结束的任务元信息（运行状态置为 cancelled，避免重启后悬挂）。"""
+        """从数据库恢复未结束的任务元信息（运行状态置为 cancelled，避免重启后悬挂）。
+
+        DB 任务量大时不全量加载——只取最近 _MAX_TASKS_IN_MEMORY 条 + 全部
+        未结束态（运行/暂停/HITL）。其余历史任务在 get_or_load 时按需懒加载。
+        """
         try:
             from ..db import AsyncSessionLocal, TaskRecord
             async with AsyncSessionLocal() as s:
-                rows = (await s.execute(select(TaskRecord))).scalars().all()
+                # 1) 全部活跃态任务（必须恢复，避免悬挂）
+                active_states = [
+                    TaskState.RUNNING.value, TaskState.PAUSED.value,
+                    TaskState.AWAITING_HITL.value, TaskState.PENDING.value,
+                ]
+                active = (await s.execute(
+                    select(TaskRecord).where(TaskRecord.state.in_(active_states))
+                )).scalars().all()
+                # 2) 最近 N 条已结束任务（按 updated_at DESC）
+                recent = (await s.execute(
+                    select(TaskRecord)
+                    .where(TaskRecord.state.in_([
+                        TaskState.COMPLETED.value, TaskState.FAILED.value, TaskState.CANCELLED.value,
+                    ]))
+                    .order_by(TaskRecord.updated_at.desc())
+                    .limit(_MAX_TASKS_IN_MEMORY)
+                )).scalars().all()
+                rows = list(active) + list(recent)
                 for r in rows:
                     state = TaskState(r.state) if r.state in TaskState._value2member_map_ else TaskState.PENDING
                     if state in (TaskState.RUNNING, TaskState.PAUSED, TaskState.AWAITING_HITL):
@@ -241,29 +264,40 @@ class TaskManager:
         """REST/WS 端点专用：内存优先，未命中则从 DB 懒加载并回填缓存。
 
         修复历史任务被 _maybe_evict 淘汰后点击返回 404 的问题。
+        加 per-task 锁，防止并发请求重复查询 DB / 覆盖 asyncio.Event。
         """
         t = self._tasks.get(task_id)
         if t is not None:
             return t
-        try:
-            from ..db import AsyncSessionLocal, TaskRecord
-            async with AsyncSessionLocal() as s:
-                rec = (await s.execute(
-                    select(TaskRecord).where(TaskRecord.task_id == task_id)
-                )).scalar_one_or_none()
-            if rec is None:
+        # 获取/创建该 task_id 的加载锁（self._load_locks 在 __init__ 中初始化）
+        lock = self._load_locks.setdefault(task_id, asyncio.Lock())
+        async with lock:
+            # 双检：进入锁后可能其他协程已完成加载
+            t = self._tasks.get(task_id)
+            if t is not None:
+                return t
+            try:
+                from ..db import AsyncSessionLocal, TaskRecord
+                async with AsyncSessionLocal() as s:
+                    rec = (await s.execute(
+                        select(TaskRecord).where(TaskRecord.task_id == task_id)
+                    )).scalar_one_or_none()
+                if rec is None:
+                    return None
+                t = self._task_from_record(rec)
+            except Exception as e:
+                logger.warning("get_or_load failed for {}: {}", task_id, e)
                 return None
-            t = self._task_from_record(rec)
-        except Exception as e:
-            logger.warning("get_or_load failed for {}: {}", task_id, e)
-            return None
-        # 回填缓存（终态任务不会触发 _maybe_evict 的频繁淘汰）
-        self._tasks[t.task_id] = t
-        if t.task_id not in self._pause_events:
-            ev = asyncio.Event(); ev.set()
-            self._pause_events[t.task_id] = ev
-        if t.task_id not in self._hitl_events:
-            self._hitl_events[t.task_id] = asyncio.Event()
+            # 回填缓存
+            self._tasks[t.task_id] = t
+            if t.task_id not in self._pause_events:
+                ev = asyncio.Event(); ev.set()
+                self._pause_events[t.task_id] = ev
+            if t.task_id not in self._hitl_events:
+                self._hitl_events[t.task_id] = asyncio.Event()
+        # 释放加载锁后再淘汰，避免锁期间 _tasks 被异步动
+        self._load_locks.pop(task_id, None)
+        self._maybe_evict()
         return t
 
     @staticmethod
@@ -329,18 +363,29 @@ class TaskManager:
 
     # ---------- HITL / 暂停 ----------
     async def pause(self, task_id: str) -> None:
+        t = self._tasks.get(task_id)
+        # 状态守卫：仅 RUNNING 可暂停（防止重水化的终态任务被错误转换）
+        if not t or t.state != TaskState.RUNNING:
+            return
         if task_id in self._pause_events:
             self._pause_events[task_id].clear()
             await self.update_state(task_id, TaskState.PAUSED)
             await emit(EventType.TASK_PAUSED, task_id)
 
     async def resume(self, task_id: str) -> None:
+        t = self._tasks.get(task_id)
+        if not t or t.state != TaskState.PAUSED:
+            return
         if task_id in self._pause_events:
             self._pause_events[task_id].set()
             await self.update_state(task_id, TaskState.RUNNING)
             await emit(EventType.TASK_RESUMED, task_id)
 
     async def cancel(self, task_id: str) -> None:
+        t = self._tasks.get(task_id)
+        # 终态任务不可再次取消，避免覆盖 COMPLETED → CANCELLED 与重复事件
+        if not t or t.state in _TERMINAL_STATES:
+            return
         # 若任务处于暂停状态，先解除 wait() 阻塞，让 CancelledError 能正常传播
         pause_ev = self._pause_events.get(task_id)
         if pause_ev:
@@ -454,6 +499,12 @@ class TaskManager:
                     await s.commit()
         except Exception as e:
             logger.warning("DB delete task failed: {}", e)
+        # 二次清理：防止并发 get_or_load 在我们 await DB 期间把任务又写回内存
+        self._tasks.pop(task_id, None)
+        self._pause_events.pop(task_id, None)
+        self._hitl_events.pop(task_id, None)
+        self._task_handles.pop(task_id, None)
+        self._load_locks.pop(task_id, None)
         # 工作区清理
         if t and t.work_dir:
             try:

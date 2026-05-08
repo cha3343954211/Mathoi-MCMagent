@@ -163,6 +163,7 @@ class EventBus:
 
     _MAX_HISTORY_PER_TASK = 2000   # 每任务最多保留事件数
     _TRIM_TO = 1500                # 超限后裁剪至此数量
+    _MAX_TASKS_IN_HISTORY = 500    # 全局缓存的任务历史上限（LRU 淘汰）
 
     # ---- publish --------------------------------------------------------
     async def publish(self, event: Event) -> None:
@@ -192,7 +193,11 @@ class EventBus:
 
     # ---- DB 加载 --------------------------------------------------------
     async def _load_from_db(self, task_id: str) -> None:
-        """从 DB 懒加载历史事件到内存缓存（每个 task_id 仅加载一次）。"""
+        """从 DB 懒加载历史事件到内存缓存（每个 task_id 仅加载一次）。
+
+        仅加载最近 _MAX_HISTORY_PER_TASK 条；加载后触发全局 LRU 淘汰，
+        防止历史任务越访问越多内存。
+        """
         if task_id in self._db_loaded:
             return
         self._db_loaded.add(task_id)
@@ -200,10 +205,12 @@ class EventBus:
             from ..db import AsyncSessionLocal, EventRecord
             from sqlalchemy import select as sa_select
             async with AsyncSessionLocal() as s:
+                # 取最近 N 条（DESC + LIMIT），单任务事件极多时也不会一次拉全表
                 rows = (await s.execute(
                     sa_select(EventRecord)
                     .where(EventRecord.task_id == task_id)
-                    .order_by(EventRecord.timestamp)
+                    .order_by(EventRecord.timestamp.desc())
+                    .limit(self._MAX_HISTORY_PER_TASK)
                 )).scalars().all()
             events: list[Event] = []
             for r in rows:
@@ -226,6 +233,28 @@ class EventBus:
             self._history[task_id] = merged
         except Exception:
             pass
+        # 加载后做一次全局 LRU 淘汰
+        self._evict_history_lru()
+
+    def _evict_history_lru(self) -> None:
+        """全局历史缓存超限时，淘汰无活跃订阅且最久未更新的任务历史。"""
+        if len(self._history) <= self._MAX_TASKS_IN_HISTORY:
+            return
+        # 候选：没有活跃 WS 订阅者的任务
+        candidates = [
+            tid for tid in self._history.keys()
+            if not self._subscribers.get(tid)
+        ]
+        if not candidates:
+            return
+        # 按最后一条事件时间戳升序（最旧的先淘汰）
+        candidates.sort(
+            key=lambda tid: self._history[tid][-1].timestamp if self._history[tid] else 0.0
+        )
+        excess = len(self._history) - self._MAX_TASKS_IN_HISTORY
+        for tid in candidates[:excess]:
+            self._history.pop(tid, None)
+            self._db_loaded.discard(tid)
 
     # ---- subscribe ------------------------------------------------------
     async def subscribe(self, task_id: str) -> asyncio.Queue:
