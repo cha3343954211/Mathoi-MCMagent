@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     max_revision_rounds: int = 2
     max_task_hours: float = 6.0   # 单任务最长运行时间（小时），超时强制 FAILED
     hitl_timeout_hours: float = 24.0  # HITL 等待上限（小时），超时自动 approve
+    daily_token_quota: int = 0        # 用户每日 token 上限（0 = 不限）
 
     # OpenAlex 学术搜索（Writer 引用文献用）
     openalex_email: str = ""   # polite pool 必填，空则跳过文献搜索

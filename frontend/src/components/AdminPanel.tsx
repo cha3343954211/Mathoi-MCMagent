@@ -564,6 +564,9 @@ function UserUsageDialog({ userId, onClose }: { userId: number; onClose: () => v
 function SettingsTab() {
   const [data, setData] = useState<SystemSettings | null>(null)
   const [email, setEmail] = useState('')
+  const [quota, setQuota] = useState('0')
+  const [savingEmail, setSavingEmail] = useState(false)
+  const [savingQuota, setSavingQuota] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -572,6 +575,7 @@ function SettingsTab() {
       const s = await api.adminGetSettings()
       setData(s)
       setEmail(s.openalex_email || '')
+      setQuota(String(s.daily_token_quota ?? 0))
     } catch (e: any) {
       setMsg({ type: 'err', text: e?.message || '加载失败' })
     }
@@ -589,6 +593,22 @@ function SettingsTab() {
       setMsg({ type: 'err', text: e?.message || '保存失败' })
     } finally {
       setSaving(false)
+      setTimeout(() => setMsg(null), 3000)
+    }
+  }
+
+  const onSaveQuota = async () => {
+    setSavingQuota(true); setMsg(null)
+    try {
+      const q = Math.max(0, parseInt(quota, 10) || 0)
+      const next = await api.adminUpdateSettings({ daily_token_quota: q })
+      setData(next)
+      setQuota(String(next.daily_token_quota ?? 0))
+      setMsg({ type: 'ok', text: '配额已保存' })
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.message || '保存失败' })
+    } finally {
+      setSavingQuota(false)
       setTimeout(() => setMsg(null), 3000)
     }
   }
@@ -656,6 +676,42 @@ function SettingsTab() {
             {msg.text}
           </p>
         )}
+      </section>
+
+      {/* 每日 Token 配额 */}
+      <section className="border border-ink-200 rounded-lg p-5">
+        <header className="flex items-baseline justify-between mb-2">
+          <h3 className="text-sm font-semibold">用户每日 Token 配额</h3>
+          <span className={`text-[11px] px-2 py-0.5 border rounded ${
+            data.daily_token_quota_source === 'db'
+              ? 'text-green-700 bg-green-50 border-green-200'
+              : 'text-blue-700 bg-blue-50 border-blue-200'
+          }`}>
+            来源：{data.daily_token_quota_source === 'db' ? '数据库' : '.env / 默认'}
+          </span>
+        </header>
+        <p className="text-xs text-ink-500 leading-relaxed mb-3">
+          每位用户每 UTC 日最多消耗的 total_tokens 上限。<code className="px-1 py-0.5 bg-ink-100 rounded text-[11px]">0</code> = 不限制。
+          超限后当日 LLM 调用将被拒绝并报错，次日自动解除。
+        </p>
+        <div className="flex gap-2 items-center">
+          <input
+            type="number"
+            min="0"
+            step="10000"
+            value={quota}
+            onChange={e => setQuota(e.target.value)}
+            placeholder="0 = 不限制"
+            className="w-40 px-3 py-2 border border-ink-200 rounded text-sm focus:outline-none focus:border-ink-500"
+          />
+          <span className="text-xs text-ink-400">tokens / 日</span>
+          <button
+            onClick={onSaveQuota}
+            disabled={savingQuota || parseInt(quota, 10) === data.daily_token_quota}
+            className="px-4 py-2 bg-ink-800 text-white rounded text-sm hover:bg-ink-700 disabled:bg-ink-300 disabled:cursor-not-allowed">
+            {savingQuota ? '保存中…' : '保存'}
+          </button>
+        </div>
       </section>
 
       {/* 提示卡 */}

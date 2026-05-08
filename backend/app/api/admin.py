@@ -500,16 +500,19 @@ async def usage_for_user(user_id: int, session: AsyncSession = Depends(get_sessi
 
 # ---------- System Settings ----------
 # 白名单：仅允许通过 UI 修改这些键，避免任意键被注入
-_ALLOWED_SETTING_KEYS = {"openalex_email"}
+_ALLOWED_SETTING_KEYS = {"openalex_email", "daily_token_quota"}
 
 
 class SettingsOut(BaseModel):
     openalex_email: str = ""
     openalex_email_source: str = "unset"   # 'db' | 'env' | 'unset'
+    daily_token_quota: int = 0             # 0 = 不限制
+    daily_token_quota_source: str = "env" # 'db' | 'env'
 
 
 class SettingsUpdate(BaseModel):
     openalex_email: Optional[str] = Field(default=None, max_length=255)
+    daily_token_quota: Optional[int] = Field(default=None, ge=0)
 
 
 @router.get("/settings", response_model=SettingsOut)
@@ -522,11 +525,20 @@ async def get_system_settings(session: AsyncSession = Depends(get_session)):
     env_email = (_gs().openalex_email or "").strip()
     db_email = (db_kv.get("openalex_email") or "").strip()
 
-    if db_email:
-        return SettingsOut(openalex_email=db_email, openalex_email_source="db")
-    if env_email:
-        return SettingsOut(openalex_email=env_email, openalex_email_source="env")
-    return SettingsOut(openalex_email="", openalex_email_source="unset")
+    db_quota_raw = db_kv.get("daily_token_quota", "")
+    if db_quota_raw and db_quota_raw.isdigit():
+        quota_val = int(db_quota_raw)
+        quota_src = "db"
+    else:
+        quota_val = _gs().daily_token_quota
+        quota_src = "env"
+
+    email_val = db_email or env_email or ""
+    email_src = "db" if db_email else ("env" if env_email else "unset")
+    return SettingsOut(
+        openalex_email=email_val, openalex_email_source=email_src,
+        daily_token_quota=quota_val, daily_token_quota_source=quota_src,
+    )
 
 
 @router.put("/settings", response_model=SettingsOut)
@@ -542,6 +554,8 @@ async def update_system_settings(body: SettingsUpdate, session: AsyncSession = D
             if "@" not in v or "." not in v.split("@", 1)[-1]:
                 raise HTTPException(400, "OpenAlex email 格式不正确")
             value = v
+        if key == "daily_token_quota":
+            value = str(max(0, int(value))) if value else "0"
         # upsert
         row = (await session.execute(
             select(SystemSetting).where(SystemSetting.key == key)

@@ -9,7 +9,7 @@ import aiofiles
 
 from ..llm.schema import ToolSpec
 from ..sandbox import JupyterSandbox
-from ..tools.scholar import search_openalex, papers_to_prompt_text
+from ..tools.scholar import search_openalex, papers_to_prompt_text, search_arxiv, arxiv_to_prompt_text
 from .base import Tool, ToolRegistry
 
 
@@ -226,6 +226,38 @@ def build_writer_registry(work_dir: Path, openalex_email: str = "") -> ToolRegis
             },
         ),
         handler=search_papers,
+    ))
+
+    # ---- search_arxiv ----
+    async def _search_arxiv(query: str, limit: int = 6) -> dict[str, Any]:
+        """搜索 arXiv 预印本，无需邮箱，始终可用。"""
+        papers = await search_arxiv(query, limit=limit)
+        if not papers:
+            return {"found": 0, "papers": "", "note": "arXiv 未检索到相关预印本"}
+        return {
+            "found": len(papers),
+            "papers": arxiv_to_prompt_text(papers),
+            "note": f"已检索 {len(papers)} 篇 arXiv 预印本，请将引用格式插入正文并在文末列出。",
+        }
+
+    reg.register(Tool(
+        spec=ToolSpec(
+            name="search_arxiv",
+            description=(
+                "搜索 arXiv 预印本数据库，无需配置邮箱，始终可用。"
+                "适合检索最新算法、模型和方法论文（如 'graph neural network traffic prediction'）。"
+                "与 search_papers(OpenAlex) 互补：arXiv 偏新，OpenAlex 偏经典。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "英文关键词效果最佳"},
+                    "limit": {"type": "integer", "default": 6, "description": "返回数量（1-15）"},
+                },
+                "required": ["query"],
+            },
+        ),
+        handler=_search_arxiv,
     ))
 
     return reg

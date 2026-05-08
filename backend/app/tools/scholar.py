@@ -126,3 +126,95 @@ def papers_to_prompt_text(papers: list[dict]) -> str:
             f"    引用次数：{p['citations']}"
         )
     return "\n\n".join(lines)
+
+
+# ---------- arXiv 检索 ----------
+_ARXIV_API = "https://export.arxiv.org/api/query"
+
+
+def _parse_arxiv_atom(xml_text: str) -> list[dict]:
+    """解析 arXiv Atom feed，返回结构化文献列表。"""
+    import xml.etree.ElementTree as ET
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "arxiv": "http://arxiv.org/schemas/atom",
+    }
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.warning("arXiv XML parse error: {}", e)
+        return []
+
+    results = []
+    for entry in root.findall("atom:entry", ns):
+        def _t(tag: str) -> str:
+            el = entry.find(tag, ns)
+            return (el.text or "").strip() if el is not None else ""
+
+        arxiv_id_raw = _t("atom:id")  # e.g. http://arxiv.org/abs/2301.00001v1
+        arxiv_id = arxiv_id_raw.split("/abs/")[-1].split("v")[0] if "/abs/" in arxiv_id_raw else ""
+
+        authors = [
+            (a.find("atom:name", ns).text or "").strip()
+            for a in entry.findall("atom:author", ns)
+            if a.find("atom:name", ns) is not None
+        ]
+        title = _t("atom:title").replace("\n", " ").strip()
+        abstract = _t("atom:summary").replace("\n", " ").strip()
+        published = _t("atom:published")[:4]  # 取年份
+
+        # GB/T 引用（arXiv 预印本格式）
+        authors_str = (
+            f"{authors[0]}, et al." if len(authors) > 3
+            else ", ".join(authors) if authors else "Unknown"
+        )
+        citation_gb = (
+            f"{authors_str}. {title}[J/OL]. arXiv, {published}. "
+            f"https://arxiv.org/abs/{arxiv_id}"
+        )
+
+        results.append({
+            "title": title,
+            "abstract": abstract,
+            "authors": authors,
+            "year": published,
+            "arxiv_id": arxiv_id,
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+            "citations": 0,
+            "citation_gb": citation_gb,
+            "source": "arXiv",
+        })
+    return results
+
+
+async def search_arxiv(query: str, limit: int = 8) -> list[dict]:
+    """异步搜索 arXiv（无需 email/注册），返回结构化文献列表。"""
+    params = {
+        "search_query": f"all:{query}",
+        "start": 0,
+        "max_results": min(limit, 15),
+        "sortBy": "relevance",
+        "sortOrder": "descending",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(_ARXIV_API, params=params)
+            resp.raise_for_status()
+            return _parse_arxiv_atom(resp.text)
+    except Exception as exc:
+        logger.warning("arXiv request failed: {}", exc)
+        return []
+
+
+def arxiv_to_prompt_text(papers: list[dict]) -> str:
+    """将 arXiv 文献格式化为 Writer prompt 文本。"""
+    if not papers:
+        return "（未检索到相关预印本）"
+    lines = []
+    for i, p in enumerate(papers, 1):
+        abstract_short = p["abstract"][:300] + "…" if len(p["abstract"]) > 300 else p["abstract"]
+        lines.append(
+            f"[arXiv-{i}] {p['citation_gb']}\n"
+            f"    摘要：{abstract_short}"
+        )
+    return "\n\n".join(lines)

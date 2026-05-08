@@ -164,6 +164,8 @@ export interface SystemSettings {
   openalex_email: string
   /** 来源：'db' | 'env' | 'unset'，仅展示用 */
   openalex_email_source: string
+  daily_token_quota: number        // 0 = 不限制
+  daily_token_quota_source: string // 'db' | 'env'
 }
 
 export interface AgentUsageStat {
@@ -316,7 +318,7 @@ export const api = {
   // 系统设置（OpenAlex email 等）
   adminGetSettings: () =>
     request<SystemSettings>('/api/admin/settings'),
-  adminUpdateSettings: (body: Partial<{ openalex_email: string }>) =>
+  adminUpdateSettings: (body: Partial<{ openalex_email: string; daily_token_quota: number }>) =>
     request<SystemSettings>('/api/admin/settings', {
       method: 'PUT', body: JSON.stringify(body),
     }),

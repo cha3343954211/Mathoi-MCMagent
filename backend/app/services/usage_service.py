@@ -4,6 +4,11 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+# 每日 token 查询缓存（避免每次 LLM 调用都查 DB）
+# key: user_id  value: (total_tokens_today, cache_expire_ts)
+_quota_cache: dict[int, tuple[int, float]] = {}
+_QUOTA_CACHE_TTL = 60.0   # 缓存 60 秒
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -174,6 +179,37 @@ async def stats_for_task(task_id: str) -> dict[str, Any]:
             for r in rows
         ],
     }
+
+
+async def get_user_today_tokens(user_id: int) -> int:
+    """查询用户今日 UTC 已消耗 total_tokens（含缓存，60s TTL）。"""
+    now = time.time()
+    cached = _quota_cache.get(user_id)
+    if cached and cached[1] > now:
+        return cached[0]
+    # 今日 UTC 0 点时间戳
+    import datetime
+    today_start = datetime.datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    async with AsyncSessionLocal() as s:
+        total = (await s.execute(
+            select(func.coalesce(func.sum(UsageRecord.total_tokens), 0))
+            .where(UsageRecord.user_id == user_id)
+            .where(UsageRecord.created_at >= today_start)
+            .where(UsageRecord.ok == True)  # noqa: E712
+        )).scalar_one()
+    result = int(total or 0)
+    _quota_cache[user_id] = (result, now + _QUOTA_CACHE_TTL)
+    return result
+
+
+def invalidate_quota_cache(user_id: int | None = None) -> None:
+    """配额变更后清除缓存。"""
+    if user_id is None:
+        _quota_cache.clear()
+    else:
+        _quota_cache.pop(user_id, None)
 
 
 async def stats_for_user(session: AsyncSession, user_id: int, limit: int = 100) -> dict[str, Any]:

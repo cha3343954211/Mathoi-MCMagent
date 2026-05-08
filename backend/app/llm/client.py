@@ -195,6 +195,17 @@ async def chat_for_user(
     # 熔断器检查（open 状态直接抛出，不发 LLM 请求）
     _cb_check(user_id, agent)
 
+    # 日额配额检查（0 = 不限制）
+    _quota = get_settings().daily_token_quota
+    if _quota > 0:
+        from ..services.usage_service import get_user_today_tokens
+        _today = await get_user_today_tokens(user_id)
+        if _today >= _quota:
+            raise LLMError(
+                f"每日 token 配额已用尽（已用 {_today:,} / 上限 {_quota:,}），"
+                "请明日再试或联系管理员调整配额。"
+            )
+
     last_err: Optional[Exception] = None
     resp: dict[str, Any] = {}
     # task_id 存在时走内部流式调用，发射 stream_chunk 事件

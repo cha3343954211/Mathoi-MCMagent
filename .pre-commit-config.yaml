@@ -1,0 +1,32 @@
+repos:
+  # ── 通用 ──────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: "^.*\\.(md|txt)$"
+      - id: end-of-file-fixer
+        exclude: "^.*\\.(md)$"
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+        exclude: "tsconfig.*\\.json$"
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ── Python (ruff) ─────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      - id: ruff
+        args: [--select, "E,F,W,I", --ignore, "E501", --fix]
+        files: ^backend/
+
+  # ── TypeScript / JavaScript (prettier) ───────────────────
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        files: ^frontend/src/
+        types_or: [ts, tsx, javascript, jsx, css]
+        args: [--write, --tab-width=2, --single-quote=false]
