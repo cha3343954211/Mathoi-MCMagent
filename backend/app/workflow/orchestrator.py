@@ -27,7 +27,7 @@ from ..core.config import get_settings
 from ..core.events import EventType, emit
 from ..core.logging import logger
 from ..exporters import export_paper
-from ..sandbox import JupyterSandbox
+from ..sandbox import JupyterSandbox, create_sandbox
 from ..llm import image_part_from_file
 from ..tasks import TaskState, task_manager
 from ..tools import build_default_registry, build_writer_registry
@@ -56,7 +56,7 @@ async def run_workflow(task_id: str) -> None:
     await emit(EventType.TASK_STARTED, task_id)
 
     try:
-        async with JupyterSandbox(task_id, work_dir) as sandbox:
+        async with create_sandbox(task_id, work_dir) as sandbox:
             task_manager.register_sandbox(task_id, sandbox)   # 中断接口可用
             tools = build_default_registry(sandbox, work_dir)
             data_summary = _describe_data(work_dir, task.data_files)

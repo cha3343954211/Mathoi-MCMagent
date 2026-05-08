@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     # 沙箱
     sandbox_timeout: int = 120
     sandbox_kernel: str = "python3"
+    sandbox_kind: Literal["local", "e2b"] = "local"  # 执行环境选择
+    e2b_api_key: str = ""                             # E2B 云端沙算 API Key
 
     # 工作流
     max_coder_iterations: int = 8
