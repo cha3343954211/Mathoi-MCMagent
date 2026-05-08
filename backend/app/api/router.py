@@ -328,6 +328,37 @@ _IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif
 _IMAGE_EXTS  = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
+async def _effective_upload_limits(settings) -> dict:
+    """从 DB 读取管理员设置的上传限制，DB 无记录则回退到 env Settings。"""
+    try:
+        from ..db import AsyncSessionLocal
+        from ..db.models import SystemSetting
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(
+                select(SystemSetting).where(SystemSetting.key.in_([
+                    "max_upload_file_mb", "max_upload_total_mb", "max_upload_files"
+                ]))
+            )).scalars().all()
+        kv = {r.key: r.value for r in rows}
+
+        def _int(key: str, default: int) -> int:
+            raw = kv.get(key, "")
+            return int(raw) if raw and raw.isdigit() and int(raw) > 0 else default
+
+        return {
+            "max_upload_file_mb":  _int("max_upload_file_mb",  settings.max_upload_file_mb),
+            "max_upload_total_mb": _int("max_upload_total_mb", settings.max_upload_total_mb),
+            "max_upload_files":    _int("max_upload_files",    settings.max_upload_files),
+        }
+    except Exception:
+        # DB 不可用时降级到 env 默认值，不阻塞上传
+        return {
+            "max_upload_file_mb":  settings.max_upload_file_mb,
+            "max_upload_total_mb": settings.max_upload_total_mb,
+            "max_upload_files":    settings.max_upload_files,
+        }
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(
     title: str = Form(...),
@@ -338,14 +369,16 @@ async def create_task(
     if not title or len(problem) < 10:
         raise HTTPException(400, "title 与 problem（至少 10 字）必填")
 
+    # 读取有效上传限制：DB 中管理员设置优先，env 兜底
     settings = get_settings()
+    _eff = await _effective_upload_limits(settings)
     real_files = [f for f in files if f and f.filename]
-    if len(real_files) > settings.max_upload_files:
+    if len(real_files) > _eff["max_upload_files"]:
         raise HTTPException(
-            413, f"上传文件数超过上限（{settings.max_upload_files}）"
+            413, f"上传文件数超过上限（{_eff['max_upload_files']}）"
         )
-    per_limit = settings.max_upload_file_mb * 1024 * 1024
-    total_limit = settings.max_upload_total_mb * 1024 * 1024
+    per_limit = _eff["max_upload_file_mb"] * 1024 * 1024
+    total_limit = _eff["max_upload_total_mb"] * 1024 * 1024
 
     # 先创建任务（获取 work_dir）
     t = await task_manager.create(user_id=user.id, title=title, problem=problem, data_files=[])

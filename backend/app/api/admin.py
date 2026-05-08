@@ -500,7 +500,10 @@ async def usage_for_user(user_id: int, session: AsyncSession = Depends(get_sessi
 
 # ---------- System Settings ----------
 # 白名单：仅允许通过 UI 修改这些键，避免任意键被注入
-_ALLOWED_SETTING_KEYS = {"openalex_email", "daily_token_quota"}
+_ALLOWED_SETTING_KEYS = {
+    "openalex_email", "daily_token_quota",
+    "max_upload_file_mb", "max_upload_total_mb", "max_upload_files",
+}
 
 
 class SettingsOut(BaseModel):
@@ -508,11 +511,19 @@ class SettingsOut(BaseModel):
     openalex_email_source: str = "unset"   # 'db' | 'env' | 'unset'
     daily_token_quota: int = 0             # 0 = 不限制
     daily_token_quota_source: str = "env" # 'db' | 'env'
+    # 上传限制（0 表示沿用 env 默认）
+    max_upload_file_mb: int = 100
+    max_upload_total_mb: int = 500
+    max_upload_files: int = 20
+    upload_limits_source: str = "env"      # 'db' | 'env'
 
 
 class SettingsUpdate(BaseModel):
     openalex_email: Optional[str] = Field(default=None, max_length=255)
     daily_token_quota: Optional[int] = Field(default=None, ge=0)
+    max_upload_file_mb: Optional[int] = Field(default=None, ge=1, le=10240)   # 1MB~10GB
+    max_upload_total_mb: Optional[int] = Field(default=None, ge=1, le=102400) # 最大 100GB
+    max_upload_files: Optional[int] = Field(default=None, ge=1, le=500)
 
 
 @router.get("/settings", response_model=SettingsOut)
@@ -521,8 +532,9 @@ async def get_system_settings(session: AsyncSession = Depends(get_session)):
     from ..core.config import get_settings as _gs
     rows = (await session.execute(select(SystemSetting))).scalars().all()
     db_kv = {r.key: r.value for r in rows}
+    env = _gs()
 
-    env_email = (_gs().openalex_email or "").strip()
+    env_email = (env.openalex_email or "").strip()
     db_email = (db_kv.get("openalex_email") or "").strip()
 
     db_quota_raw = db_kv.get("daily_token_quota", "")
@@ -530,14 +542,25 @@ async def get_system_settings(session: AsyncSession = Depends(get_session)):
         quota_val = int(db_quota_raw)
         quota_src = "db"
     else:
-        quota_val = _gs().daily_token_quota
+        quota_val = env.daily_token_quota
         quota_src = "env"
+
+    # 上传限制：任意一项在 DB 中则标记来源为 'db'
+    def _int_key(key: str, default: int) -> int:
+        raw = db_kv.get(key, "")
+        return int(raw) if raw and raw.isdigit() else default
+
+    upload_src = "db" if any(k in db_kv for k in ("max_upload_file_mb", "max_upload_total_mb", "max_upload_files")) else "env"
 
     email_val = db_email or env_email or ""
     email_src = "db" if db_email else ("env" if env_email else "unset")
     return SettingsOut(
         openalex_email=email_val, openalex_email_source=email_src,
         daily_token_quota=quota_val, daily_token_quota_source=quota_src,
+        max_upload_file_mb=_int_key("max_upload_file_mb", env.max_upload_file_mb),
+        max_upload_total_mb=_int_key("max_upload_total_mb", env.max_upload_total_mb),
+        max_upload_files=_int_key("max_upload_files", env.max_upload_files),
+        upload_limits_source=upload_src,
     )
 
 
@@ -554,7 +577,7 @@ async def update_system_settings(body: SettingsUpdate, session: AsyncSession = D
             if "@" not in v or "." not in v.split("@", 1)[-1]:
                 raise HTTPException(400, "OpenAlex email 格式不正确")
             value = v
-        if key == "daily_token_quota":
+        if key in ("daily_token_quota", "max_upload_file_mb", "max_upload_total_mb", "max_upload_files"):
             value = str(max(0, int(value))) if value else "0"
         # upsert
         row = (await session.execute(

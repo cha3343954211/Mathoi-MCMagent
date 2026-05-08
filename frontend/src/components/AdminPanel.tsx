@@ -641,8 +641,12 @@ function SettingsTab() {
   const [data, setData] = useState<SystemSettings | null>(null)
   const [email, setEmail] = useState('')
   const [quota, setQuota] = useState('0')
+  const [uploadFileMb, setUploadFileMb] = useState('100')
+  const [uploadTotalMb, setUploadTotalMb] = useState('500')
+  const [uploadMaxFiles, setUploadMaxFiles] = useState('20')
   const [savingEmail, setSavingEmail] = useState(false)
   const [savingQuota, setSavingQuota] = useState(false)
+  const [savingUpload, setSavingUpload] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -652,6 +656,9 @@ function SettingsTab() {
       setData(s)
       setEmail(s.openalex_email || '')
       setQuota(String(s.daily_token_quota ?? 0))
+      setUploadFileMb(String(s.max_upload_file_mb ?? 100))
+      setUploadTotalMb(String(s.max_upload_total_mb ?? 500))
+      setUploadMaxFiles(String(s.max_upload_files ?? 20))
     } catch (e: any) {
       setMsg({ type: 'err', text: e?.message || '加载失败' })
     }
@@ -685,6 +692,30 @@ function SettingsTab() {
       setMsg({ type: 'err', text: e?.message || '保存失败' })
     } finally {
       setSavingQuota(false)
+      setTimeout(() => setMsg(null), 3000)
+    }
+  }
+
+  const onSaveUploadLimits = async () => {
+    const fMb = Math.max(1, parseInt(uploadFileMb, 10) || 100)
+    const tMb = Math.max(1, parseInt(uploadTotalMb, 10) || 500)
+    const nFiles = Math.max(1, parseInt(uploadMaxFiles, 10) || 20)
+    setSavingUpload(true); setMsg(null)
+    try {
+      const next = await api.adminUpdateSettings({
+        max_upload_file_mb: fMb,
+        max_upload_total_mb: tMb,
+        max_upload_files: nFiles,
+      })
+      setData(next)
+      setUploadFileMb(String(next.max_upload_file_mb ?? 100))
+      setUploadTotalMb(String(next.max_upload_total_mb ?? 500))
+      setUploadMaxFiles(String(next.max_upload_files ?? 20))
+      setMsg({ type: 'ok', text: '上传限制已保存' })
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.message || '保存失败' })
+    } finally {
+      setSavingUpload(false)
       setTimeout(() => setMsg(null), 3000)
     }
   }
@@ -787,6 +818,68 @@ function SettingsTab() {
             className="px-4 py-2 bg-ink-800 text-white rounded text-sm hover:bg-ink-700 disabled:bg-ink-300 disabled:cursor-not-allowed">
             {savingQuota ? '保存中…' : '保存'}
           </button>
+        </div>
+      </section>
+
+      {/* 上传限制 */}
+      <section className="border border-ink-200 rounded-lg p-5">
+        <header className="flex items-baseline justify-between mb-2">
+          <h3 className="text-sm font-semibold">文件上传限制</h3>
+          <span className={`text-[11px] px-2 py-0.5 border rounded ${
+            data.upload_limits_source === 'db'
+              ? 'text-green-700 bg-green-50 border-green-200'
+              : 'text-blue-700 bg-blue-50 border-blue-200'
+          }`}>
+            来源：{data.upload_limits_source === 'db' ? '数据库' : '.env / 默认'}
+          </span>
+        </header>
+        <p className="text-xs text-ink-500 leading-relaxed mb-4">
+          控制用户创建任务时允许上传的文件体积与数量上限，超限返回 HTTP 413。
+          修改后对新任务立即生效，无需重启服务。
+        </p>
+        <div className="grid grid-cols-3 gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-ink-500">单文件最大 (MB)</span>
+            <input
+              type="number" min="1" max="10240" step="1"
+              value={uploadFileMb}
+              onChange={e => setUploadFileMb(e.target.value)}
+              className="px-3 py-2 border border-ink-200 rounded text-sm focus:outline-none focus:border-ink-500"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-ink-500">总量上限 (MB)</span>
+            <input
+              type="number" min="1" max="102400" step="1"
+              value={uploadTotalMb}
+              onChange={e => setUploadTotalMb(e.target.value)}
+              className="px-3 py-2 border border-ink-200 rounded text-sm focus:outline-none focus:border-ink-500"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-ink-500">最多文件数</span>
+            <input
+              type="number" min="1" max="500" step="1"
+              value={uploadMaxFiles}
+              onChange={e => setUploadMaxFiles(e.target.value)}
+              className="px-3 py-2 border border-ink-200 rounded text-sm focus:outline-none focus:border-ink-500"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <button
+            onClick={onSaveUploadLimits}
+            disabled={savingUpload || (
+              parseInt(uploadFileMb, 10) === data.max_upload_file_mb &&
+              parseInt(uploadTotalMb, 10) === data.max_upload_total_mb &&
+              parseInt(uploadMaxFiles, 10) === data.max_upload_files
+            )}
+            className="px-4 py-2 bg-ink-800 text-white rounded text-sm hover:bg-ink-700 disabled:bg-ink-300 disabled:cursor-not-allowed">
+            {savingUpload ? '保存中…' : '保存'}
+          </button>
+          <span className="text-[11px] text-ink-400">
+            当前生效：单文件 {data.max_upload_file_mb} MB · 总量 {data.max_upload_total_mb} MB · 最多 {data.max_upload_files} 个文件
+          </span>
         </div>
       </section>
 

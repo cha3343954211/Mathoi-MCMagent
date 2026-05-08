@@ -166,6 +166,11 @@ export interface SystemSettings {
   openalex_email_source: string
   daily_token_quota: number        // 0 = 不限制
   daily_token_quota_source: string // 'db' | 'env'
+  /** 上传限制 */
+  max_upload_file_mb: number       // 单文件 MB
+  max_upload_total_mb: number      // 总量 MB
+  max_upload_files: number         // 文件数
+  upload_limits_source: string     // 'db' | 'env'
 }
 
 export interface SearchConfig {
@@ -337,7 +342,13 @@ export const api = {
   // 系统设置（OpenAlex email 等）
   adminGetSettings: () =>
     request<SystemSettings>('/api/admin/settings'),
-  adminUpdateSettings: (body: Partial<{ openalex_email: string; daily_token_quota: number }>) =>
+  adminUpdateSettings: (body: Partial<{
+    openalex_email: string
+    daily_token_quota: number
+    max_upload_file_mb: number
+    max_upload_total_mb: number
+    max_upload_files: number
+  }>) =>
     request<SystemSettings>('/api/admin/settings', {
       method: 'PUT', body: JSON.stringify(body),
     }),
