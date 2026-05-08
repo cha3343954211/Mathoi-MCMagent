@@ -9,7 +9,6 @@ import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from sqlalchemy import select
-from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from ..core.config import get_settings
 from ..core.events import EventType
@@ -222,58 +221,98 @@ async def chat_for_user(
     resp: dict[str, Any] = {}
     # task_id 存在时走内部流式调用，发射 stream_chunk 事件
     use_stream = bool(task_id)
-    _attempt_no = 0
 
-    async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, min=2, max=60),
-        retry=retry_if_exception(_is_transient),   # 只重试瞬时错误
-        reraise=True,
-    ):
-        with attempt:
-            _attempt_no += 1
-            # 429 时追加 Retry-After 等待（在 tenacity 退避之外）
-            if last_err is not None and _attempt_no > 1:
-                ra = _retry_after_seconds(last_err)
-                if ra > 0:
-                    logger.info("LLM 429 Retry-After={}s | agent={}", ra, agent)
-                    await asyncio.sleep(min(ra, 120))
-                # 重试时向前端推送可见提示（替换原先的沉默间断）
-                if task_id:
-                    try:
-                        _err_name = type(last_err).__name__
-                        _is_timeout = isinstance(last_err, (asyncio.TimeoutError, TimeoutError))
-                        _reason = "调用超时" if _is_timeout else f"异常({_err_name})"
-                        await emit_event(
-                            EventType.AGENT_MESSAGE, task_id, agent=agent,
-                            role="system",
-                            content=(
-                                f"[模型{_reason}，正在第 {_attempt_no}/{4} 次重试，"
-                                f"请稍候...]"
-                            ),
-                        )
-                    except Exception:
-                        pass
-            try:
-                if cfg.backend == "litellm":
-                    resp = await (
-                        _call_litellm_streaming(cfg, params, task_id, agent)
-                        if use_stream else _call_litellm(cfg, params)
+    # 手写重试循环：替换 tenacity 以获得对暂停/取消的精细控制
+    # （tenacity 的 wait_exponential 用 asyncio.sleep 长睡，期间 pause/cancel 失效）
+    MAX_ATTEMPTS = 4
+    BACKOFF = [2.0, 4.0, 8.0]   # 1→2 / 2→3 / 3→4 之间的退避秒数
+
+    async def _wait_paused() -> None:
+        """协助函数：检查任务是否暂停，若是则阻塞至恢复。失败静默忽略。"""
+        if not task_id:
+            return
+        try:
+            from ..tasks.manager import task_manager
+            await task_manager.wait_if_paused(task_id)
+        except Exception:
+            pass
+
+    for attempt_no in range(1, MAX_ATTEMPTS + 1):
+        # 每次尝试前先检查暂停（包括首次，确保暂停状态下不发起新调用）
+        await _wait_paused()
+
+        # 退避等待（仅重试时；含 Retry-After 覆盖 + 暂停感知分片睡眠）
+        if attempt_no > 1 and last_err is not None:
+            ra = _retry_after_seconds(last_err)
+            wait_secs = BACKOFF[attempt_no - 2]
+            if ra > 0:
+                wait_secs = max(wait_secs, min(ra, 120.0))
+                logger.info("LLM 429 Retry-After={}s | agent={}", ra, agent)
+
+            # 推送可见重试提示：同时发 AGENT_MESSAGE（持久化）与 AGENT_STREAM_CHUNK（前端流式区域内联可见）
+            if task_id:
+                _err_name = type(last_err).__name__
+                _is_timeout = isinstance(last_err, (asyncio.TimeoutError, TimeoutError))
+                _reason = "调用超时" if _is_timeout else f"异常 {_err_name}"
+                _hint = (
+                    f"\n\n⚠️ 模型{_reason}，{wait_secs:.0f}s 后第 {attempt_no}/{MAX_ATTEMPTS} 次重试...\n\n"
+                )
+                try:
+                    await emit_event(
+                        EventType.AGENT_STREAM_CHUNK, task_id,
+                        agent=agent, delta=_hint,
                     )
-                else:
-                    resp = await (
-                        _call_openai_streaming(cfg, params, task_id, agent)
-                        if use_stream else _call_openai(cfg, params)
+                    await emit_event(
+                        EventType.AGENT_MESSAGE, task_id, agent=agent,
+                        role="system", content=_hint.strip(),
                     )
-            except Exception as e:
-                last_err = e
-                if _attempt_no > 1:
-                    logger.warning("LLM retry {}/{} failed: {} | agent={} user={}",
-                                   _attempt_no, 4, type(e).__name__, agent, user_id)
-                raise
+                except Exception:
+                    pass
+
+            # 分片睡眠 + 暂停检查（每秒一次，pause/cancel 响应延迟 ≤ 1s）
+            elapsed = 0.0
+            while elapsed < wait_secs:
+                step = min(1.0, wait_secs - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
+                await _wait_paused()
+
+        # 发起调用
+        try:
+            if cfg.backend == "litellm":
+                resp = await (
+                    _call_litellm_streaming(cfg, params, task_id, agent)
+                    if use_stream else _call_litellm(cfg, params)
+                )
+            else:
+                resp = await (
+                    _call_openai_streaming(cfg, params, task_id, agent)
+                    if use_stream else _call_openai(cfg, params)
+                )
+            break   # 成功
+        except asyncio.CancelledError:
+            # 取消信号：不重试，直接传播让 orchestrator 处理
+            raise
+        except Exception as e:
+            last_err = e
+            _err_name = type(e).__name__
+            if attempt_no == 1:
+                logger.warning("LLM call failed (attempt 1/{}): {} | agent={} user={}",
+                               MAX_ATTEMPTS, _err_name, agent, user_id)
+            else:
+                logger.warning("LLM retry {}/{} failed: {} | agent={} user={}",
+                               attempt_no, MAX_ATTEMPTS, _err_name, agent, user_id)
+            # 非瞬时错误立即失败（如 401 鉴权、400 参数错误）
+            if not _is_transient(e):
+                logger.warning("LLM non-transient error, no retry | type={}", _err_name)
+                break
+            # 已用尽次数
+            if attempt_no >= MAX_ATTEMPTS:
+                break
+            # 否则进入下一轮循环重试
 
     if not resp:
-        err = f"LLM 调用失败：{last_err}"
+        err = f"LLM 调用失败（{MAX_ATTEMPTS} 次尝试后）：{last_err}"
         _cb_record(user_id, agent, success=False)
         await record_usage(
             user_id=user_id, task_id=task_id, agent=agent, backend=cfg.backend,
@@ -338,9 +377,12 @@ async def stream_for_user(
 # ---------- 后端实现 ----------
 async def _call_openai(cfg: ResolvedConfig, params: dict[str, Any]) -> dict[str, Any]:
     from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0)
-    resp = await client.chat.completions.create(**params)
-    return resp.model_dump()
+    # async with 确保 httpx 连接池在调用结束后释放，避免超时重试时连接泄漏
+    async with AsyncOpenAI(
+        api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0,
+    ) as client:
+        resp = await client.chat.completions.create(**params)
+        return resp.model_dump()
 
 
 async def _stream_chunks_openai(
@@ -361,6 +403,13 @@ async def _stream_chunks_openai(
 
         stream = await client.chat.completions.create(**params)
         async for chunk in stream:
+            # 流式 chunk 级别的暂停检查：用户暂停后不再推送下一个 token
+            if task_id:
+                try:
+                    from ..tasks.manager import task_manager
+                    await task_manager.wait_if_paused(task_id)
+                except Exception:
+                    pass
             if getattr(chunk, "usage", None):
                 usage_obj = chunk.usage
             if not chunk.choices:
@@ -403,28 +452,30 @@ async def _call_openai_streaming(
 ) -> dict[str, Any]:
     """内部流式调用：逐 chunk 发射 AGENT_STREAM_CHUNK 事件，返回与 _call_openai 相同结构。
     自动降级：若提供商不支持 stream_options 则去掉该参数重试。
+    async with 确保异常/超时后连接池被关闭，避免重试时连接泄漏。
     """
     from openai import AsyncOpenAI, BadRequestError
-    client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0)
-    # 先尝试带 include_usage 的流（标准 OpenAI 支持）
-    try:
+    async with AsyncOpenAI(
+        api_key=cfg.api_key, base_url=cfg.base_url or None, timeout=120.0,
+    ) as client:
+        # 先尝试带 include_usage 的流（标准 OpenAI 支持）
+        try:
+            return await _stream_chunks_openai(
+                client,
+                {**params, "stream": True, "stream_options": {"include_usage": True}},
+                task_id, agent_name,
+            )
+        except BadRequestError as e:
+            err_str = str(e).lower()
+            if "stream_options" not in err_str and "400" not in err_str:
+                raise
+            logger.debug("stream_options not supported by provider, retrying without it")
+        # 降级：不带 stream_options
         return await _stream_chunks_openai(
             client,
-            {**params, "stream": True, "stream_options": {"include_usage": True}},
+            {**params, "stream": True},
             task_id, agent_name,
         )
-    except (BadRequestError, Exception) as e:
-        # 仅在参数错误时降级，其他异常继续抛出
-        err_str = str(e).lower()
-        if "stream_options" not in err_str and "400" not in err_str:
-            raise
-        logger.debug("stream_options not supported by provider, retrying without it")
-    # 降级：不带 stream_options
-    return await _stream_chunks_openai(
-        client,
-        {**params, "stream": True},
-        task_id, agent_name,
-    )
 
 
 async def _stream_openai(cfg: ResolvedConfig, params: dict[str, Any]) -> AsyncIterator[str]:
@@ -468,6 +519,13 @@ async def _call_litellm_streaming(
         usage_obj = None
 
         async for chunk in stream:
+            # 流式 chunk 级别的暂停检查
+            if task_id:
+                try:
+                    from ..tasks.manager import task_manager
+                    await task_manager.wait_if_paused(task_id)
+                except Exception:
+                    pass
             try:
                 if getattr(chunk, "usage", None):
                     usage_obj = chunk.usage
