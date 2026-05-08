@@ -147,7 +147,7 @@ class BaseAgent:
             self._trim_history()
 
     async def _chat_with_retry(self, tool_specs) -> ChatMessage:
-        """LLM 调用（tenacity 内部已处理重试，这里不再叠加）。"""
+        """LLM 调用（chat_for_user 内部已含暂停感知重试循环，这里不再叠加）。"""
         return await chat_for_user(
             user_id=self.user_id,
             agent=self.name,

@@ -224,8 +224,11 @@ async def chat_for_user(
 
     # 手写重试循环：替换 tenacity 以获得对暂停/取消的精细控制
     # （tenacity 的 wait_exponential 用 asyncio.sleep 长睡，期间 pause/cancel 失效）
-    MAX_ATTEMPTS = 4
-    BACKOFF = [2.0, 4.0, 8.0]   # 1→2 / 2→3 / 3→4 之间的退避秒数
+    _settings = get_settings()
+    MAX_ATTEMPTS = max(1, int(_settings.llm_max_attempts))
+    _b0 = max(0.1, float(_settings.llm_retry_initial_backoff))
+    # 指数退避：[b0, 2*b0, 4*b0, ...]，长度 = MAX_ATTEMPTS - 1
+    BACKOFF: list[float] = [_b0 * (2 ** i) for i in range(max(0, MAX_ATTEMPTS - 1))]
 
     async def _wait_paused() -> None:
         """协助函数：检查任务是否暂停，若是则阻塞至恢复。失败静默忽略。"""

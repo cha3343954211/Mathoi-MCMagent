@@ -102,6 +102,8 @@ class Settings(BaseSettings):
     daily_token_quota: int = 0        # 用户每日 token 上限（0 = 不限）
     max_concurrent_tasks: int = 4     # 同时运行任务上限（0 = 不限）；8C8G 推荐 4
     llm_call_timeout: int = 180       # 单次 LLM 调用硬超时（秒，0=不限）；含完整流式收集
+    llm_max_attempts: int = 4         # LLM 重试总尝试次数（含首次）；最小 1
+    llm_retry_initial_backoff: float = 2.0  # 重试初始退避（秒），后续 ×2 指数增长
 
     # 上传限制（防止恶意/误操作 OOM）
     max_upload_file_mb: int = 100     # 单文件最大体积（MB）
