@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -587,20 +587,40 @@ async def download_notebook(task_id: str, user: User = Depends(get_current_user)
 
 
 @router.get("/tasks/{task_id}/archive")
-async def download_archive(task_id: str, user: User = Depends(get_current_user)) -> Any:
-    """将工作区所有文件打包为 ZIP 下载。"""
+async def download_archive(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+) -> Any:
+    """将工作区所有文件打包为 ZIP 下载（磁盘临时文件，避免大工作区 OOM）。"""
     t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
-    import io, zipfile as _zip
+    import tempfile, zipfile as _zip
     wd = Path(t.work_dir)
-    buf = io.BytesIO()
-    with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as zf:
-        for p in sorted(wd.rglob("*")):
-            if p.is_file():
-                zf.write(p, p.relative_to(wd))
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
+    # 临时文件落在工作区父级，避免跨盘 IO；下载完成后由 BackgroundTasks 清理
+    tmp_path = Path(tempfile.mkstemp(prefix=f"archive_{task_id}_", suffix=".zip")[1])
+    try:
+        with _zip.ZipFile(tmp_path, "w", _zip.ZIP_DEFLATED, allowZip64=True) as zf:
+            for p in sorted(wd.rglob("*")):
+                if p.is_file():
+                    try:
+                        zf.write(p, p.relative_to(wd))
+                    except Exception as e:
+                        logger.warning("archive skip {}: {}", p, e)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    def _cleanup(p: Path = tmp_path) -> None:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+    background_tasks.add_task(_cleanup)
+
+    return FileResponse(
+        tmp_path,
         media_type="application/zip",
+        filename=f"{task_id}.zip",
         headers={"Content-Disposition": f'attachment; filename="{task_id}.zip"'},
     )
 

@@ -269,36 +269,41 @@ class TaskManager:
         t = self._tasks.get(task_id)
         if t is not None:
             return t
-        # 获取/创建该 task_id 的加载锁（self._load_locks 在 __init__ 中初始化）
+        # 获取/创建该 task_id 的加载锁
         lock = self._load_locks.setdefault(task_id, asyncio.Lock())
-        async with lock:
-            # 双检：进入锁后可能其他协程已完成加载
-            t = self._tasks.get(task_id)
-            if t is not None:
-                return t
-            try:
-                from ..db import AsyncSessionLocal, TaskRecord
-                async with AsyncSessionLocal() as s:
-                    rec = (await s.execute(
-                        select(TaskRecord).where(TaskRecord.task_id == task_id)
-                    )).scalar_one_or_none()
-                if rec is None:
+        rehydrated = False
+        try:
+            async with lock:
+                # 双检：进入锁后可能其他协程已完成加载
+                t = self._tasks.get(task_id)
+                if t is not None:
+                    return t
+                try:
+                    from ..db import AsyncSessionLocal, TaskRecord
+                    async with AsyncSessionLocal() as s:
+                        rec = (await s.execute(
+                            select(TaskRecord).where(TaskRecord.task_id == task_id)
+                        )).scalar_one_or_none()
+                    if rec is None:
+                        return None
+                    t = self._task_from_record(rec)
+                except Exception as e:
+                    logger.warning("get_or_load failed for {}: {}", task_id, e)
                     return None
-                t = self._task_from_record(rec)
-            except Exception as e:
-                logger.warning("get_or_load failed for {}: {}", task_id, e)
-                return None
-            # 回填缓存
-            self._tasks[t.task_id] = t
-            if t.task_id not in self._pause_events:
-                ev = asyncio.Event(); ev.set()
-                self._pause_events[t.task_id] = ev
-            if t.task_id not in self._hitl_events:
-                self._hitl_events[t.task_id] = asyncio.Event()
-        # 释放加载锁后再淘汰，避免锁期间 _tasks 被异步动
-        self._load_locks.pop(task_id, None)
-        self._maybe_evict()
-        return t
+                # 回填缓存
+                self._tasks[t.task_id] = t
+                if t.task_id not in self._pause_events:
+                    ev = asyncio.Event(); ev.set()
+                    self._pause_events[t.task_id] = ev
+                if t.task_id not in self._hitl_events:
+                    self._hitl_events[t.task_id] = asyncio.Event()
+                rehydrated = True
+                return t
+        finally:
+            # 无论何种出口都释放锁对象（防止扫描不存在 task_id 导致锁字典无限增长）
+            self._load_locks.pop(task_id, None)
+            if rehydrated:
+                self._maybe_evict()
 
     @staticmethod
     def _task_from_record(r: Any) -> Task:
@@ -515,6 +520,12 @@ class TaskManager:
 
     def attach_handle(self, task_id: str, handle: asyncio.Task) -> None:
         self._task_handles[task_id] = handle
+        # 任务自然结束 / 取消 / 异常时自动清理，避免长期累积引用
+        def _cleanup(_fut: asyncio.Future, _tid: str = task_id) -> None:
+            cur = self._task_handles.get(_tid)
+            if cur is _fut:
+                self._task_handles.pop(_tid, None)
+        handle.add_done_callback(_cleanup)
 
     # ---------- Sandbox 注册表 ----------
     def register_sandbox(self, task_id: str, sandbox: Any) -> None:
