@@ -425,7 +425,16 @@ CODER_EDA_PROMPT = """## 当前任务：EDA（探索性数据分析）
 4. 变量间相关性（热力图）
 5. 关键统计量 `print` 输出（放入 `【图数据特征】` 标记块）
 
-最后用 `write_file` 保存 `eda_report.md`（含关键发现摘要），再回复 `TASK_COMPLETE`。
+完成后依次执行：
+1. 用 `write_file` 保存 `eda_report.md`（含关键发现摘要）；
+2. 打印图表产出汇总（**必须**）：
+   ```
+   【图表产出汇总】
+   fig_eda_xxx.png
+   fig_eda_yyy.png
+   （列出本阶段所有 save_fig 保存的文件名）
+   ```
+3. 回复 `TASK_COMPLETE`。
 """
 
 CODER_SENSITIVITY_PROMPT = """## 当前任务：敏感性分析
@@ -439,7 +448,16 @@ CODER_SENSITIVITY_PROMPT = """## 当前任务：敏感性分析
 3. 绘制参数敏感性曲线（带置信域填充）
 4. `print` 输出鲁棒性结论（放入 `【建模结果汇总】` 标记块）
 
-最后用 `write_file` 保存 `sensitivity_report.md`，再回复 `TASK_COMPLETE`。
+完成后依次执行：
+1. 用 `write_file` 保存 `sensitivity_report.md`（含各参数敏感程度排序与结论）；
+2. 打印图表产出汇总（**必须**）：
+   ```
+   【图表产出汇总】
+   fig_sens_param1.png
+   fig_sens_param2.png
+   （列出本阶段所有 save_fig 保存的文件名）
+   ```
+3. 回复 `TASK_COMPLETE`。
 """
 
 # ── Writer ────────────────────────────────────────────────────────────────────

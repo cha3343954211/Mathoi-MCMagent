@@ -215,9 +215,17 @@ async def run_workflow(task_id: str) -> None:
                     _solution_ctx(ques_key) + data_ctx + eda_ctx +
                     f"## 当前任务：求解问题 {qi}\n\n"
                     f"问题描述：{ques_text}\n\n"
-                    f"完整实现求解、可视化并保存结果。\n"
-                    f"图表命名：`fig_q{qi}_*.png`。\n"
-                    f"最后用 `write_file` 保存 `result_q{qi}.md`（含关键数值结论），再回复 `TASK_COMPLETE`。"
+                    f"完整实现求解、可视化并保存结果，图表命名：`fig_q{qi}_*.png`。\n\n"
+                    f"完成后依次执行：\n"
+                    f"1. 用 `write_file` 保存 `result_q{qi}.md`（含关键数值结论和模型评估指标）；\n"
+                    f"2. 打印图表产出汇总（**必须**）：\n"
+                    f"   ```\n"
+                    f"   【图表产出汇总】\n"
+                    f"   fig_q{qi}_xxx.png\n"
+                    f"   fig_q{qi}_yyy.png\n"
+                    f"   （列出本阶段所有 save_fig 保存的文件名）\n"
+                    f"   ```\n"
+                    f"3. 回复 `TASK_COMPLETE`。"
                 )
                 try:
                     q_out = await coder_q.run(q_prompt)
@@ -411,7 +419,10 @@ async def run_workflow(task_id: str) -> None:
             eda_prompt = (
                 tpl.get("eda", WRITER_SECTION_EDA)
                 + f"\n\n# EDA 分析报告\n{eda_report}\n\n"
-                + f"# EDA 图表目录（必须全部插入）\n{eda_catalog}\n"
+                + f"# EDA 图表目录（必须全部插入）\n{eda_catalog}\n\n"
+                + "⚠️ **图片约束**：仅允许引用上方「EDA 图表目录」中列出的文件名；"
+                + "目录之外的图片文件名严禁出现在 `![]()` 中，否则生成 PDF 时会断图。"
+                + "目录为空时改为用文字描述分析结果，不插入任何图片。\n"
             )
             s = await _write_section("writer:eda", eda_prompt, "sec_eda.md")
             if s: sections.append(s)
@@ -458,7 +469,9 @@ async def run_workflow(task_id: str) -> None:
                     f"- 每张图前2-3句铺垫（含具体数值），图后1-2句结论；",
                     f"- 图表格式：![描述](文件名)\\n**图X：说明**；",
                     f"- 所有数值来自 Coder 报告，精确4位有效数字，严禁编造；",
-                    f"- 全文禁止 bullet 列举，段落式叙述。",
+                    f"- 全文禁止 bullet 列举，段落式叙述；",
+                    f"- ⚠️ **仅允许引用「本问图表目录」中的文件名**，目录外路径严禁出现在 `![]()` 中；",
+                    f"  目录为空或某图缺失时，改用文字描述该分析结论，不可编造图号。",
                 ])
                 s = await _write_section(phase_name, q_prompt, f"sec_q{qi}.md")
                 if s: sections.append(s)
@@ -474,7 +487,9 @@ async def run_workflow(task_id: str) -> None:
             sens_prompt = (
                 tpl.get("sensitivity_analysis", WRITER_SECTION_SENSITIVITY)
                 + f"\n\n# 敏感性分析报告\n{sens_report}\n\n"
-                + f"# 敏感性图表（必须全部插入）\n{sens_catalog}\n"
+                + f"# 敏感性图表目录（必须全部插入）\n{sens_catalog}\n\n"
+                + "⚠️ **图片约束**：仅允许引用上方「敏感性图表目录」中列出的文件名；"
+                + "目录之外的图片路径严禁出现在 `![]()` 中。目录为空时改用文字描述敏感性结论。\n"
             )
             s = await _write_section("writer:sensitivity", sens_prompt, "sec_sensitivity.md")
             if s: sections.append(s)
@@ -650,7 +665,7 @@ async def _reconcile_figures(
             task_id=task_id, user_id=user_id, tools=tools,
             max_iterations=max_iterations,
         )
-        fix_agent.wait_if_paused = (lambda: task_manager.wait_if_paused(task_id))  # type: ignore[assignment]
+        _patch_agent_with_hitl(fix_agent, task_id)  # 保证暂停/取消可中断
         await fix_agent.run(fix_prompt)
     except Exception as e:
         logger.warning("[{}] 补做失败（非致命）: {}", phase, e)
@@ -741,15 +756,18 @@ def _load_md_template() -> dict[str, str]:
 
 
 def _extract_figure_features(agent_output: str, label: str = "") -> str:
-    """从 Agent 返回文本中提取 【图数据特征】 和 【建模结果汇总】 块，供 Writer 使用。
-    若无特征输出则返回空字符串。
+    """从 Agent 返回文本中提取以下内容，供 Writer 使用：
+    - 【图数据特征 - *】 块
+    - 【建模结果汇总】 块
+    - 【图表产出汇总】 块（Coder 打印的已保存文件清单）
+    若无任何内容则返回空字符串。
     """
     if not agent_output:
         return ""
     import re as _re
-    # 匹配 【...】 开头的特征块（多行，直到下一个空行或文末）
+    # 匹配 【图数据特征/建模结果汇总/图表产出汇总】 开头的块（多行，直到下一个空行或文末）
     pattern = _re.compile(
-        r"(【(?:图数据特征|建模结果汇总)[^\n]*】.*?)(?=\n\n|\Z)",
+        r"(【(?:图数据特征|建模结果汇总|图表产出汇总)[^\n]*】.*?)(?=\n\n|\Z)",
         _re.DOTALL,
     )
     matches = pattern.findall(agent_output)
@@ -760,18 +778,65 @@ def _extract_figure_features(agent_output: str, label: str = "") -> str:
 
 
 def _ensure_all_figures_in_paper(paper_md: Path, catalog: list[dict]) -> None:
-    """后处理：把 catalog 中未被 paper.md 引用的图追加到文末，避免遗漏。"""
+    """后处理：把 catalog 中未被 paper.md 引用的图就近追加，避免遗漏断图。
+
+    追加策略（按归属章节）：
+    - question==0  (EDA)  → 追加至「描述性统计」章节尾部
+    - question==N  (各问) → 追加至对应「5.N」子节尾部
+    - question==-1 (敏感性) → 追加至「六」章节尾部
+    - 兜底 → 追加至全文末尾
+    """
     content = paper_md.read_text(encoding="utf-8")
-    missing = [e for e in catalog if e["file"] not in content]
-    if not missing:
+    missing_entries = [e for e in catalog if e["file"] not in content]
+    if not missing_entries:
         return
 
-    logger.warning("paper.md 遗漏 {} 张图，自动追加", len(missing))
-    appendix = "\n\n## 附录：补充图表\n\n"
-    for e in missing:
-        appendix += (
-            f"如图{e['index']}所示，该图为 {e['caption']}。\n\n"
-            f"![{e['caption']}]({e['file']})\n\n"
-            f"**图{e['index']}：{e['caption']}**\n\n"
-        )
-    paper_md.write_text(content + appendix, encoding="utf-8")
+    logger.warning("paper.md 遗漏 {} 张图，尝试就近追加", len(missing_entries))
+
+    # 按问题分组
+    from collections import defaultdict
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for e in missing_entries:
+        groups[e["question"]].append(e)
+
+    lines = content.split("\n")
+    insertions: list[tuple[int, str]] = []   # (line_index_after, text_to_insert)
+
+    def _find_section_end(keyword_patterns: list[str]) -> int:
+        """找到包含关键词的最后一行，返回其行号（0-based），找不到返回 -1。"""
+        last = -1
+        for i, line in enumerate(lines):
+            for kw in keyword_patterns:
+                if kw in line:
+                    last = i
+        return last
+
+    for qn, entries in sorted(groups.items()):
+        # 找插入点
+        if qn == 0:
+            # EDA 章节：找"描述性统计"或"EDA"相关标题
+            pos = _find_section_end(["描述性统计", "EDA", "数据预处理", "四.2", "4.2"])
+        elif qn == -1:
+            pos = _find_section_end(["六、", "敏感性分析", "6.1", "## 六"])
+        else:
+            pos = _find_section_end([f"5.{qn}", f"5.{qn}.", f"问题{qn}模型", f"## 5.{qn}"])
+
+        snippet = "\n"
+        for e in entries:
+            snippet += (
+                f"\n如图{e['index']}所示，{e['caption']}的分析结果如下。\n\n"
+                f"![{e['caption']}]({e['file']})\n\n"
+                f"**图{e['index']}：{e['caption']}**\n"
+            )
+
+        if pos >= 0:
+            insertions.append((pos, snippet))
+        else:
+            # 兜底：追加至文末
+            insertions.append((len(lines) - 1, snippet))
+
+    # 从后向前插入（避免行号偏移）
+    for pos, text in sorted(insertions, key=lambda x: x[0], reverse=True):
+        lines.insert(pos + 1, text)
+
+    paper_md.write_text("\n".join(lines), encoding="utf-8")
