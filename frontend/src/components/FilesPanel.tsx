@@ -6,6 +6,10 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import clsx from 'clsx'
+import mermaid from 'mermaid'
+
+// 初始化 mermaid（全局一次）
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' })
 
 // ── 文件分类 ──────────────────────────────────────────────────────────────────
 const GROUP_ORDER = ['paper', 'report', 'figure', 'script', 'data', 'export', 'other']
@@ -406,7 +410,16 @@ function MdViewer({
         </pre>
       )
     },
-    code({ inline, children, ...props }: any) {
+    code({ inline, className, children, ...props }: any) {
+      // mermaid 代码块：返回特殊 span，由 useEffect 统一渲染
+      if (!inline && className === 'language-mermaid') {
+        return (
+          <span
+            className="mermaid-block block my-4"
+            data-diagram={String(children).trim()}
+          />
+        )
+      }
       if (inline) {
         return (
           <code {...props} className="px-1 py-0.5 bg-ink-100 text-ink-700 rounded text-[0.85em] font-mono">
@@ -414,12 +427,33 @@ function MdViewer({
           </code>
         )
       }
-      return <code {...props}>{children}</code>
+      return <code {...props} className={className}>{children}</code>
     },
     p({ children, ...props }: any) {
       return <p className="my-3 leading-relaxed" {...props}>{children}</p>
     },
   }), [taskId])
+
+  // 渲染 Mermaid 图表
+  const mdRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!mdRef.current) return
+    const blocks = mdRef.current.querySelectorAll<HTMLElement>('.mermaid-block')
+    if (!blocks.length) return
+    let id = 0
+    blocks.forEach(async el => {
+      const diagram = el.getAttribute('data-diagram') || ''
+      if (!diagram || el.getAttribute('data-rendered')) return
+      el.setAttribute('data-rendered', '1')
+      try {
+        const uid = `mermaid-${Date.now()}-${id++}`
+        const { svg } = await mermaid.render(uid, diagram)
+        el.innerHTML = svg
+      } catch {
+        el.innerHTML = `<pre class="text-xs text-red-400 p-3 bg-red-50 rounded">${diagram}</pre>`
+      }
+    })
+  }, [content])
 
   if (loading) {
     return (
@@ -464,7 +498,7 @@ function MdViewer({
       </div>
 
       {/* 正文 */}
-      <div className={clsx(
+      <div ref={mdRef} className={clsx(
         'markdown-body min-w-0 overflow-hidden',
         isPaper
           ? 'px-12 py-10 max-w-4xl mx-auto'
