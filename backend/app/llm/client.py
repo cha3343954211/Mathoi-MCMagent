@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from sqlalchemy import select
@@ -48,11 +49,21 @@ def _is_transient(exc: Exception) -> bool:
             return True
     except ImportError:
         pass
+    # asyncio / stdlib 超时（由 asyncio.wait_for 或 wait_for 包裹的硬超时触发）
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
     # 通用：HTTP 状态码
     status = getattr(exc, "status_code", None)
     if status in (429, 500, 502, 503, 504):
         return True
     return False
+
+
+async def _with_timeout(coro, timeout_secs: int):
+    """若 timeout_secs > 0，用 wait_for 对整个协程施加硬超时；否则直接 await。"""
+    if timeout_secs > 0:
+        return await asyncio.wait_for(coro, timeout=float(timeout_secs))
+    return await coro
 
 
 def _retry_after_seconds(exc: Exception) -> float:
@@ -226,8 +237,23 @@ async def chat_for_user(
                 ra = _retry_after_seconds(last_err)
                 if ra > 0:
                     logger.info("LLM 429 Retry-After={}s | agent={}", ra, agent)
-                    import asyncio as _aio
-                    await _aio.sleep(min(ra, 120))
+                    await asyncio.sleep(min(ra, 120))
+                # 重试时向前端推送可见提示（替换原先的沉默间断）
+                if task_id:
+                    try:
+                        _err_name = type(last_err).__name__
+                        _is_timeout = isinstance(last_err, (asyncio.TimeoutError, TimeoutError))
+                        _reason = "调用超时" if _is_timeout else f"异常({_err_name})"
+                        await emit_event(
+                            EventType.AGENT_MESSAGE, task_id, agent=agent,
+                            role="system",
+                            content=(
+                                f"[模型{_reason}，正在第 {_attempt_no}/{4} 次重试，"
+                                f"请稍候...]"
+                            ),
+                        )
+                    except Exception:
+                        pass
             try:
                 if cfg.backend == "litellm":
                     resp = await (
@@ -321,45 +347,54 @@ async def _stream_chunks_openai(
     client: Any, params: dict[str, Any],
     task_id: Optional[str], agent_name: str,
 ) -> dict[str, Any]:
-    """执行一次流式调用并收集结果。params 中已含 stream=True 等参数。"""
-    full_content = ""
-    tool_calls_acc: dict[int, dict] = {}
-    usage_obj = None
+    """执行一次流式调用并收集结果。params 中已含 stream=True 等参数。
+    整体受 llm_call_timeout 硬超时约束，防止流挂死（provider 发 heartbeat 导致
+    httpx read timeout 无法触发的情况）。
+    """
+    from ..core.config import get_settings
+    _timeout = get_settings().llm_call_timeout
 
-    stream = await client.chat.completions.create(**params)
-    async for chunk in stream:
-        if getattr(chunk, "usage", None):
-            usage_obj = chunk.usage
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta.content:
-            full_content += delta.content
-            if task_id:
-                await emit_event(EventType.AGENT_STREAM_CHUNK, task_id,
-                                 agent=agent_name, delta=delta.content)
-        for tc in (getattr(delta, "tool_calls", None) or []):
-            i = tc.index
-            if i not in tool_calls_acc:
-                tool_calls_acc[i] = {"id": "", "type": "function",
-                                     "function": {"name": "", "arguments": ""}}
-            if tc.id:
-                tool_calls_acc[i]["id"] = tc.id
-            if tc.function:
-                if tc.function.name:
-                    tool_calls_acc[i]["function"]["name"] += tc.function.name
-                if tc.function.arguments:
-                    tool_calls_acc[i]["function"]["arguments"] += tc.function.arguments
+    async def _collect() -> dict[str, Any]:
+        full_content = ""
+        tool_calls_acc: dict[int, dict] = {}
+        usage_obj = None
 
-    tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
-    return {
-        "choices": [{"message": {
-            "role": "assistant",
-            "content": full_content or None,
-            "tool_calls": tool_calls,
-        }}],
-        "usage": usage_obj.model_dump() if usage_obj else {},
-    }
+        stream = await client.chat.completions.create(**params)
+        async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage_obj = chunk.usage
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                full_content += delta.content
+                if task_id:
+                    await emit_event(EventType.AGENT_STREAM_CHUNK, task_id,
+                                     agent=agent_name, delta=delta.content)
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                i = tc.index
+                if i not in tool_calls_acc:
+                    tool_calls_acc[i] = {"id": "", "type": "function",
+                                         "function": {"name": "", "arguments": ""}}
+                if tc.id:
+                    tool_calls_acc[i]["id"] = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        tool_calls_acc[i]["function"]["name"] += tc.function.name
+                    if tc.function.arguments:
+                        tool_calls_acc[i]["function"]["arguments"] += tc.function.arguments
+
+        tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
+        return {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": full_content or None,
+                "tool_calls": tool_calls,
+            }}],
+            "usage": usage_obj.model_dump() if usage_obj else {},
+        }
+
+    return await _with_timeout(_collect(), _timeout)
 
 
 async def _call_openai_streaming(
@@ -417,60 +452,65 @@ async def _call_litellm_streaming(
     task_id: Optional[str], agent_name: str,
 ) -> dict[str, Any]:
     import litellm
+    from ..core.config import get_settings
+    _timeout = get_settings().llm_call_timeout
+
     p = {**params, "stream": True}
     if cfg.base_url:
         p["api_base"] = cfg.base_url
     if cfg.api_key:
         p["api_key"] = cfg.api_key
 
-    stream = await litellm.acompletion(**p)
-    full_content = ""
-    tool_calls_acc: dict[int, dict] = {}
-    usage_obj = None
+    async def _collect() -> dict[str, Any]:
+        stream = await litellm.acompletion(**p)
+        full_content = ""
+        tool_calls_acc: dict[int, dict] = {}
+        usage_obj = None
 
-    async for chunk in stream:
-        try:
-            if getattr(chunk, "usage", None):
-                usage_obj = chunk.usage
-            if not getattr(chunk, "choices", None):
+        async for chunk in stream:
+            try:
+                if getattr(chunk, "usage", None):
+                    usage_obj = chunk.usage
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None) or ""
+                if content:
+                    full_content += content
+                    if task_id:
+                        await emit_event(EventType.AGENT_STREAM_CHUNK, task_id,
+                                         agent=agent_name, delta=content)
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    i = getattr(tc, "index", 0)
+                    if i not in tool_calls_acc:
+                        tool_calls_acc[i] = {"id": "", "type": "function",
+                                             "function": {"name": "", "arguments": ""}}
+                    if getattr(tc, "id", None):
+                        tool_calls_acc[i]["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        tool_calls_acc[i]["function"]["name"] += getattr(fn, "name", "") or ""
+                        tool_calls_acc[i]["function"]["arguments"] += getattr(fn, "arguments", "") or ""
+            except Exception:
                 continue
-            delta = chunk.choices[0].delta
-            content = getattr(delta, "content", None) or ""
-            if content:
-                full_content += content
-                if task_id:
-                    await emit_event(EventType.AGENT_STREAM_CHUNK, task_id,
-                                     agent=agent_name, delta=content)
-            for tc in (getattr(delta, "tool_calls", None) or []):
-                i = getattr(tc, "index", 0)
-                if i not in tool_calls_acc:
-                    tool_calls_acc[i] = {"id": "", "type": "function",
-                                         "function": {"name": "", "arguments": ""}}
-                if getattr(tc, "id", None):
-                    tool_calls_acc[i]["id"] = tc.id
-                fn = getattr(tc, "function", None)
-                if fn:
-                    tool_calls_acc[i]["function"]["name"] += getattr(fn, "name", "") or ""
-                    tool_calls_acc[i]["function"]["arguments"] += getattr(fn, "arguments", "") or ""
-        except Exception:
-            continue
 
-    tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
-    # litellm usage 对象统一安全转 dict
-    usage_dict: dict[str, Any] = {}
-    if usage_obj is not None:
-        if hasattr(usage_obj, "model_dump"):
-            usage_dict = usage_obj.model_dump()
-        elif hasattr(usage_obj, "__dict__"):
-            usage_dict = {k: v for k, v in usage_obj.__dict__.items() if not k.startswith("_")}
-    return {
-        "choices": [{"message": {
-            "role": "assistant",
-            "content": full_content or None,
-            "tool_calls": tool_calls,
-        }}],
-        "usage": usage_dict,
-    }
+        tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
+        usage_dict: dict[str, Any] = {}
+        if usage_obj is not None:
+            if hasattr(usage_obj, "model_dump"):
+                usage_dict = usage_obj.model_dump()
+            elif hasattr(usage_obj, "__dict__"):
+                usage_dict = {k: v for k, v in usage_obj.__dict__.items() if not k.startswith("_")}
+        return {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": full_content or None,
+                "tool_calls": tool_calls,
+            }}],
+            "usage": usage_dict,
+        }
+
+    return await _with_timeout(_collect(), _timeout)
 
 
 async def _stream_litellm(cfg: ResolvedConfig, params: dict[str, Any]) -> AsyncIterator[str]:
