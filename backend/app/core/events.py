@@ -51,6 +51,10 @@ class EventType(str, Enum):
     HITL_RESOLVED = "hitl.resolved"          # 已解决
     HITL_TIMEOUT = "hitl.timeout"            # 超时自动批准
 
+    # 产物对账
+    ARTIFACT_MISSING = "artifact.missing"    # Modeler 预期但 Coder 未产出
+    ARTIFACT_RECOVERED = "artifact.recovered"  # 补做后恢复
+
 
 @dataclass
 class Event:

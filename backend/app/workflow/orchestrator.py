@@ -186,6 +186,16 @@ async def run_workflow(task_id: str) -> None:
                 coder_stdout_log.append(_extract_figure_features(eda_out, label="EDA"))
             except Exception as _e:
                 logger.warning("coder:eda failed (non-fatal): {}", _e)
+            # 产物对账：Modeler 预期 vs 实际 fig_eda_*.png
+            _eda_expected = _extract_expected_figures(
+                solutions.get("eda", "") or solutions.get("_raw", ""), scope="eda"
+            )
+            if _eda_expected:
+                await _reconcile_figures(
+                    task_id=task_id, user_id=uid, work_dir=work_dir, tools=tools,
+                    phase="coder:eda", prefix="fig_eda_", expected=_eda_expected,
+                    solution_ctx=_solution_ctx("eda") + data_ctx,
+                )
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:eda")
 
             # 2b: 逐问求解（只传对应问题的方案）
@@ -214,6 +224,16 @@ async def run_workflow(task_id: str) -> None:
                     coder_stdout_log.append(_extract_figure_features(q_out, label=f"问题{qi}"))
                 except Exception as _e:
                     logger.warning("coder:q{} failed (non-fatal): {}", qi, _e)
+                # 产物对账：fig_q{qi}_*.png
+                _q_expected = _extract_expected_figures(
+                    solutions.get(ques_key, "") or solutions.get("_raw", ""), scope=f"q{qi}"
+                )
+                if _q_expected:
+                    await _reconcile_figures(
+                        task_id=task_id, user_id=uid, work_dir=work_dir, tools=tools,
+                        phase=f"coder:q{qi}", prefix=f"fig_q{qi}_", expected=_q_expected,
+                        solution_ctx=_solution_ctx(ques_key) + data_ctx + eda_ctx,
+                    )
                 await emit(EventType.PHASE_EXIT, task_id, phase=f"coder:q{qi}")
                 await task_manager.wait_if_paused(task_id)  # 逐问间检查点
 
@@ -229,6 +249,17 @@ async def run_workflow(task_id: str) -> None:
                 coder_stdout_log.append(_extract_figure_features(sens_out, label="敏感性分析"))
             except Exception as _e:
                 logger.warning("coder:sensitivity failed (non-fatal): {}", _e)
+            # 产物对账：fig_sens_*.png
+            _sens_expected = _extract_expected_figures(
+                solutions.get("sensitivity_analysis", "") or solutions.get("_raw", ""),
+                scope="sensitivity",
+            )
+            if _sens_expected:
+                await _reconcile_figures(
+                    task_id=task_id, user_id=uid, work_dir=work_dir, tools=tools,
+                    phase="coder:sensitivity", prefix="fig_sens_", expected=_sens_expected,
+                    solution_ctx=_solution_ctx("sensitivity_analysis") + data_ctx,
+                )
             await emit(EventType.PHASE_EXIT, task_id, phase="coder:sensitivity")
 
             await task_manager.checkpoint(task_id, "coder_done", {})
@@ -259,13 +290,34 @@ async def run_workflow(task_id: str) -> None:
             )
             model_build_solve = coder_reports  # 给 Writer 看的"模型建立与求解"产出
 
+            # 最终对账：Modeler 全局预期 vs work_dir 实际存在
+            all_expected = _extract_expected_figures(modeling_plan, scope="all")
+            all_actual = _actual_figures(work_dir)
+            final_missing = _diff_missing_figures(all_expected, all_actual)
+            missing_section = ""
+            if final_missing:
+                missing_section = (
+                    "# ⚠️ 缺失图表清单（Modeler 方案提及但未成功生成，**严禁引用**）\n"
+                    + "\n".join(f"- `{f}`" for f in final_missing)
+                    + "\n\n"
+                    "**处理规则**：\n"
+                    "1. 撰写正文时**禁止使用** `![...](缺失文件名)` 引用上述任何文件；\n"
+                    "2. 原本计划在此处插图的段落，改用 1-2 句描述性文字说明该分析结果（可引用 Coder 报告中的数值）；\n"
+                    "3. 若整段分析严重依赖缺失图，可缩减该段篇幅，但不得留空或编造图号。\n\n"
+                )
+
             base_ctx = (
                 f"# 题目背景\n{questions.get('background', task.problem)}\n\n"
                 f"# 各问题描述\n{bg_questions}\n\n"
                 f"# 建模方案（Modeler 输出）\n{modeling_plan}\n\n"
                 f"# 模型建立与求解（Coder 报告）\n{model_build_solve}\n\n"
                 + (f"# 图表数据特征\n{figure_features_text}\n\n" if figure_features_text.strip() else "")
-                + f"# 全部图表目录（共 {len(figure_catalog)} 张，每张均须插入论文）\n{catalog_text}\n\n"
+                + f"# ✅ 实际可用图表目录（共 {len(figure_catalog)} 张，仅这些可插入论文）\n{catalog_text}\n\n"
+                + missing_section
+                + "# 图表引用铁律\n"
+                + "- **只允许引用「实际可用图表目录」中列出的文件名**；\n"
+                + "- 引用未列出的图片视为严重错误，会导致最终 PDF 断图；\n"
+                + "- 若需讨论某分析但无对应图，用文字描述替代，不可编造图号。\n\n"
             )
 
             # 分节写作辅助
@@ -556,6 +608,102 @@ def _format_catalog_for_writer(catalog: list[dict]) -> str:
             f"- 图{e['index']} {qstr} `{e['file']}` caption=\"{e['caption']}\"{desc}"
         )
     return "\n".join(lines)
+
+
+_FIG_NAME_RE = re.compile(r"fig_[a-zA-Z0-9_]+\.(?:png|jpg|jpeg|svg|webp)", re.IGNORECASE)
+
+
+async def _reconcile_figures(
+    *, task_id: str, user_id: int, work_dir: Path, tools,
+    phase: str, prefix: str, expected: set[str],
+    solution_ctx: str, max_iterations: int = 4,
+) -> None:
+    """对比 Modeler 预期图表与 Coder 实际产出，缺失时发事件并让 Coder 一次性补做。
+
+    只补做一次，避免陷入循环；补做失败也只记 warning。
+    """
+    actual = _actual_figures(work_dir, prefix=prefix)
+    missing = _diff_missing_figures(expected, actual)
+    if not missing:
+        return
+
+    await emit(EventType.ARTIFACT_MISSING, task_id,
+               phase=phase, expected=sorted(expected),
+               actual=sorted(actual), missing=missing)
+    logger.warning("[{}] 图表缺失 {} 张：{}", phase, len(missing), missing)
+
+    # 一次性补做 prompt：只让 Coder 补生成缺失的图表
+    fix_prompt = (
+        solution_ctx +
+        f"\n\n## ⚠️ 补做任务（{phase}）\n\n"
+        f"先前执行未生成以下图表，请**仅补生成这些缺失文件**，不要重复已有工作：\n\n"
+        + "\n".join(f"- `{f}`" for f in missing) +
+        "\n\n要求：\n"
+        "1. 使用既有数据和模型结果（可从 result_q*.md / eda_report.md 读取）；\n"
+        "2. 图表风格遵守全局约束（std_fig / save_fig / PALETTE）；\n"
+        "3. 完成后打印 `[saved] <文件名>` 并回复 `TASK_COMPLETE`；\n"
+        "4. 如某图确实无法合理生成（如依赖的模型失败），请用 print 说明原因并跳过。"
+    )
+    try:
+        from ..agents import CoderAgent as _CoderAgent
+        fix_agent = _CoderAgent(
+            task_id=task_id, user_id=user_id, tools=tools,
+            max_iterations=max_iterations,
+        )
+        fix_agent.wait_if_paused = (lambda: task_manager.wait_if_paused(task_id))  # type: ignore[assignment]
+        await fix_agent.run(fix_prompt)
+    except Exception as e:
+        logger.warning("[{}] 补做失败（非致命）: {}", phase, e)
+
+    # 补做后重新对账，发 recovered 事件
+    actual2 = _actual_figures(work_dir, prefix=prefix)
+    still_missing = _diff_missing_figures(expected, actual2)
+    recovered = sorted(set(missing) - set(still_missing))
+    if recovered:
+        await emit(EventType.ARTIFACT_RECOVERED, task_id,
+                   phase=phase, recovered=recovered, still_missing=still_missing)
+        logger.info("[{}] 补做成功 {} 张，仍缺 {} 张", phase, len(recovered), len(still_missing))
+
+
+def _extract_expected_figures(plan_text: str, scope: str = "all") -> set[str]:
+    """从 Modeler 方案正文中提取预期图表文件名集合。
+
+    scope:
+      - "eda"          仅 fig_eda_*
+      - "q{N}"         仅 fig_q{N}_*
+      - "sensitivity"  仅 fig_sens_*
+      - "all"          全部
+    """
+    if not plan_text:
+        return set()
+    names = set(m.group(0).lower() for m in _FIG_NAME_RE.finditer(plan_text))
+    if scope == "all":
+        return names
+    if scope == "eda":
+        return {n for n in names if n.startswith("fig_eda")}
+    if scope == "sensitivity":
+        return {n for n in names if n.startswith("fig_sens")}
+    if scope.startswith("q"):
+        prefix = f"fig_{scope}_"
+        return {n for n in names if n.startswith(prefix)}
+    return set()
+
+
+def _actual_figures(work_dir: Path, prefix: str = "") -> set[str]:
+    """扫描工作区实际存在的图片（小写文件名），可选按前缀过滤。"""
+    result = set()
+    for p in work_dir.iterdir():
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
+            name = p.name.lower()
+            if prefix and not name.startswith(prefix):
+                continue
+            result.add(name)
+    return result
+
+
+def _diff_missing_figures(expected: set[str], actual: set[str]) -> list[str]:
+    """返回 Modeler 预期但 Coder 未产出的图片文件名（排序）。"""
+    return sorted(expected - actual)
 
 
 def _load_paper_template() -> str:

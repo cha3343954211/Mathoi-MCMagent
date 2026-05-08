@@ -542,6 +542,38 @@ function EventBody({ ev, collapsed, onToggle }: {
       const act = p.response?.action || 'approve'
       return <span className="text-xs text-emerald-700">{actionMap[act] ?? `✓ 已处理（${act}）`}</span>
     }
+    case 'hitl.timeout':
+      return (
+        <span className="text-xs text-amber-700 font-medium">
+          ⏱ {p.message || '人工审核超时，已自动批准'}
+        </span>
+      )
+
+    case 'artifact.missing':
+      return (
+        <div className="text-xs text-orange-800 space-y-1">
+          <div className="font-medium">
+            ⚠️ {p.phase || '阶段'} 缺失图表 {(p.missing as string[])?.length || 0} 张，尝试补做：
+          </div>
+          <ul className="list-disc list-inside font-mono text-[10px] text-orange-700">
+            {(p.missing as string[] || []).map(f => <li key={f}>{f}</li>)}
+          </ul>
+        </div>
+      )
+    case 'artifact.recovered':
+      return (
+        <div className="text-xs text-emerald-700 space-y-1">
+          <div className="font-medium">
+            ✓ {p.phase || '阶段'} 补做成功 {(p.recovered as string[])?.length || 0} 张
+            {(p.still_missing as string[])?.length ? `，仍缺 ${(p.still_missing as string[]).length} 张` : ''}
+          </div>
+          {(p.still_missing as string[])?.length > 0 && (
+            <ul className="list-disc list-inside font-mono text-[10px] text-amber-700">
+              {(p.still_missing as string[]).map(f => <li key={f}>{f}</li>)}
+            </ul>
+          )}
+        </div>
+      )
 
     case 'task.created':   return <span className="text-[11px] text-ink-500">📌 任务已创建</span>
     case 'task.started':   return <span className="text-[11px] text-blue-700">▶ 任务开始运行</span>
