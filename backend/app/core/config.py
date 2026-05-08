@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     max_task_hours: float = 6.0   # 单任务最长运行时间（小时），超时强制 FAILED
     hitl_timeout_hours: float = 24.0  # HITL 等待上限（小时），超时自动 approve
     daily_token_quota: int = 0        # 用户每日 token 上限（0 = 不限）
+    max_concurrent_tasks: int = 4     # 同时运行任务上限（0 = 不限）；8C8G 推荐 4
 
     # 上传限制（防止恶意/误操作 OOM）
     max_upload_file_mb: int = 100     # 单文件最大体积（MB）

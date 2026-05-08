@@ -380,8 +380,11 @@ async def create_task(
     per_limit = _eff["max_upload_file_mb"] * 1024 * 1024
     total_limit = _eff["max_upload_total_mb"] * 1024 * 1024
 
-    # 先创建任务（获取 work_dir）
-    t = await task_manager.create(user_id=user.id, title=title, problem=problem, data_files=[])
+    # 先创建任务（获取 work_dir）；并发上限超限时 create() 抛 RuntimeError
+    try:
+        t = await task_manager.create(user_id=user.id, title=title, problem=problem, data_files=[])
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
 
     data_saved: list[str] = []
     img_saved:  list[str] = []

@@ -192,6 +192,15 @@ class TaskManager:
         data_files: list[str], image_files: list[str] | None = None,
     ) -> Task:
         settings = get_settings()
+        # 并发任务上限守卫（0 = 不限）
+        limit = settings.max_concurrent_tasks
+        if limit > 0:
+            _active_states = {TaskState.RUNNING, TaskState.PAUSED, TaskState.AWAITING_HITL, TaskState.PENDING}
+            running = sum(1 for t in self._tasks.values() if t.state in _active_states)
+            if running >= limit:
+                raise RuntimeError(
+                    f"服务器当前并发任务已满（{running}/{limit}），请等待其他任务完成后重试"
+                )
         tid = uuid.uuid4().hex[:12]
         work_dir = settings.workspace_path / str(user_id) / tid
         work_dir.mkdir(parents=True, exist_ok=True)
