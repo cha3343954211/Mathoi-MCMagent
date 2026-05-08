@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from './store'
-import { TaskList } from './components/TaskList'
+import { TaskList, phaseLabel } from './components/TaskList'
 import { CreateTask } from './components/CreateTask'
 import { TraceTimeline } from './components/TraceTimeline'
 import { HITLPanel } from './components/HITLPanel'
@@ -240,7 +240,7 @@ export default function App() {
                     <StateBadge state={current.state} />
                   </div>
                   <p className="text-[11px] text-ink-400 mt-0.5 font-mono truncate">
-                    #{current.task_id}{current.phase ? ` · ${current.phase}` : ''}
+                    #{current.task_id}{current.phase ? ` · ${phaseLabel(current.phase)}` : ''}
                   </p>
                 </div>
                 {/* 移动端 spacer */}

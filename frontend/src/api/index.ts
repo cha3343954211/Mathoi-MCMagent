@@ -213,6 +213,10 @@ export const api = {
   cancel: (id: string) => request<any>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
   interrupt: (id: string) => request<{ ok: boolean; message: string }>(`/api/tasks/${id}/interrupt`, { method: 'POST' }),
   retryTask: (id: string) => request<any>(`/api/tasks/${id}/retry`, { method: 'POST' }),
+  writeFile: (id: string, path: string, content: string) =>
+    request<{ ok: boolean; size: number }>(`/api/tasks/${id}/files/${path}`, {
+      method: 'PUT', body: JSON.stringify({ content }),
+    }),
   rewriteSection: (id: string, section: string) =>
     request<{ ok: boolean; section: string }>(`/api/tasks/${id}/rewrite-section`, {
       method: 'POST', body: JSON.stringify({ section }),

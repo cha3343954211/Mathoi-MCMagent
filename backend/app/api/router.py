@@ -521,6 +521,52 @@ async def get_file(task_id: str, path: str, user: User = Depends(get_current_use
     return FileResponse(target)
 
 
+@router.put("/tasks/{task_id}/files/{path:path}")
+async def write_file(
+    task_id: str, path: str,
+    body: dict[str, Any],
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """覆盖写入工作区文本文件（仅限 .md / .txt / .py）。
+    写入 sec_*.md 后自动重组 paper.md。
+    body: { "content": "文件内容" }
+    """
+    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    if t.state == TaskState.RUNNING:
+        raise HTTPException(400, "任务正在运行，请等待完成后再编辑")
+
+    # 路径安全检查
+    wd = Path(t.work_dir).resolve()
+    target = (wd / path).resolve()
+    if not str(target).startswith(str(wd)):
+        raise HTTPException(403, "非法路径")
+
+    allowed_ext = {".md", ".txt", ".py"}
+    if target.suffix.lower() not in allowed_ext:
+        raise HTTPException(400, f"仅支持编辑 {allowed_ext} 类型文件")
+
+    content = body.get("content", "")
+    if not isinstance(content, str):
+        raise HTTPException(422, "content 必须为字符串")
+
+    target.write_text(content, encoding="utf-8")
+
+    # sec_*.md 写入后重组 paper.md
+    import re as _re
+    if _re.match(r"sec_.+\.md$", target.name):
+        try:
+            import json as _json
+            from ..workflow.rewrite import _rebuild_paper
+            q_file = wd / "questions.json"
+            questions = _json.loads(q_file.read_text(encoding="utf-8")) if q_file.exists() else {}
+            ques_count = int(questions.get("ques_count", 1))
+            _rebuild_paper(wd, ques_count, questions)
+        except Exception as _e:
+            pass  # paper.md 重组失败不影响文件保存
+
+    return {"ok": True, "path": path, "size": target.stat().st_size}
+
+
 # ---------- 导出 ----------
 
 @router.get("/tasks/{task_id}/notebook")

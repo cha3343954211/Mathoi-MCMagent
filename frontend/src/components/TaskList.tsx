@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api, TraceEvent } from '../api'
 import clsx from 'clsx'
@@ -34,7 +34,49 @@ function duration(start: number, end: number): string {
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`
 }
 
-// ── 阶段进度色 ────────────────────────────────────────────────────────────────
+// ── 阶段显示 ──────────────────────────────────────────────────────────────────
+export const PHASE_LABEL: Record<string, string> = {
+  init:                  '初始化',
+  coordinator:           '问题分析',
+  modeler:               '建模方案',
+  'coder:eda':           'EDA 探索',
+  'coder:sensitivity':   '敏感性分析',
+  'writer:abstract':     '撰写摘要',
+  'writer:restatement':  '问题重述',
+  'writer:analysis':     '问题分析',
+  'writer:assumptions':  '模型假设',
+  'writer:symbol':       '符号说明',
+  'writer:eda':          'EDA 章节',
+  'writer:sensitivity':  '敏感性章节',
+  'writer:evaluation':   '模型评价',
+}
+
+export function phaseLabel(p: string): string {
+  if (!p) return ''
+  if (PHASE_LABEL[p]) return PHASE_LABEL[p]
+  const mq = p.match(/^(coder|writer):q(\d+)$/)
+  if (mq) return `${mq[1] === 'coder' ? '求解' : '撰写'}问题 ${mq[2]}`
+  const mr = p.match(/^rewrite:(.+)$/)
+  if (mr) return `重写: ${phaseLabel(mr[1]) || mr[1]}`
+  return p
+}
+
+function phaseProgress(phase: string): number {
+  if (!phase) return 5
+  if (phase === 'init')               return 5
+  if (phase === 'coordinator')        return 12
+  if (phase === 'modeler')            return 25
+  if (phase === 'coder:eda')          return 38
+  if (phase.startsWith('coder:q')) {
+    const n = parseInt(phase.replace('coder:q', '')) || 1
+    return Math.min(38 + n * 10, 75)
+  }
+  if (phase === 'coder:sensitivity')  return 78
+  if (phase.startsWith('writer:'))    return 85
+  if (phase.startsWith('rewrite:'))   return 88
+  return 50
+}
+
 const PHASE_COLOR: Record<string, string> = {
   modeling:   'text-blue-600',
   coding:     'text-violet-600',
@@ -244,8 +286,17 @@ function TaskCard({ t, isActive, isConfirm, isDeleting, recentEvents, onSelect, 
     }
   }
 
-  const nowSec = Date.now() / 1000
   const isRunning = ACTIVE_STATES.has(t.state)
+
+  // 实时时钟：运行中每 10s 更新一次
+  const [tick, setTick] = useState(Date.now())
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  useEffect(() => {
+    if (!isRunning) { timerRef.current && clearInterval(timerRef.current); return }
+    timerRef.current = setInterval(() => setTick(Date.now()), 10_000)
+    return () => { timerRef.current && clearInterval(timerRef.current) }
+  }, [isRunning])
+  const nowSec = tick / 1000
 
   // 运行时长
   const dur = isRunning
@@ -283,9 +334,9 @@ function TaskCard({ t, isActive, isConfirm, isDeleting, recentEvents, onSelect, 
             {STATE_LABEL[t.state] || t.state}
           </span>
           {t.phase && (
-            <span className={clsx('truncate max-w-[72px] font-medium text-[9px]',
-              isActive ? 'text-ink-300' : (PHASE_COLOR[t.phase] ?? 'text-ink-500'))}>
-              {t.phase}
+            <span className={clsx('truncate max-w-[96px] font-medium text-[9px]',
+              isActive ? 'text-ink-300' : 'text-violet-600')}>
+              {phaseLabel(t.phase)}
             </span>
           )}
           {t.state === 'failed' && t.error && (
@@ -294,6 +345,18 @@ function TaskCard({ t, isActive, isConfirm, isDeleting, recentEvents, onSelect, 
             </span>
           )}
         </div>
+        {/* 进度条：仅运行中显示 */}
+        {isRunning && t.phase && (
+          <div className="pl-3.5 pr-2 mt-1.5">
+            <div className={clsx('h-0.5 rounded-full', isActive ? 'bg-white/10' : 'bg-ink-100')}>
+              <div
+                className={clsx('h-full rounded-full transition-all duration-1000',
+                  isActive ? 'bg-white/40' : 'bg-violet-400')}
+                style={{ width: `${phaseProgress(t.phase)}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* 元数据行 2：附件数 + 时长 + 时间 */}
         <div className={clsx('flex items-center gap-2 pl-3.5 mt-0.5 text-[10px]',

@@ -63,6 +63,9 @@ export function FilesPanel() {
   const [loading, setLoading]   = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)  // 移动端可折叠
   const [rewriting, setRewriting] = useState(false)
+  const [editing, setEditing]     = useState(false)
+  const [editContent, setEditContent] = useState('')
+  const [saving, setSaving]       = useState(false)
   const prevTaskId = useRef<string>('')
 
   // 从文件名解析章节 key（sec_abstract.md → abstract，sec_q1.md → q1）
@@ -100,6 +103,23 @@ export function FilesPanel() {
       }
     }
   }, [currentTask?.state, rewriting])
+
+  // 切换文件时退出编辑模式
+  useEffect(() => { setEditing(false) }, [selected])
+
+  const onStartEdit = () => { setEditContent(content); setEditing(true) }
+  const onCancelEdit = () => setEditing(false)
+  const onSaveEdit = async () => {
+    if (!current || !selected || saving) return
+    setSaving(true)
+    try {
+      await api.writeFile(current.task_id, selected, editContent)
+      setContent(editContent)
+      setEditing(false)
+    } catch (e: any) {
+      alert('保存失败：' + (e?.message || e))
+    } finally { setSaving(false) }
+  }
 
   // 文件列表刷新
   useEffect(() => {
@@ -241,19 +261,34 @@ export function FilesPanel() {
           {selected && (
             <span className="text-xs text-ink-500 truncate flex-1">{selected}</span>
           )}
-          {/* 重写此节按钮：仅对 sec_*.md 且任务非运行中时显示 */}
-          {sectionKey && current.state !== 'running' && (
-            <button
-              onClick={onRewrite}
-              disabled={rewriting}
-              title={`重新用 AI 撰写「${selected}」，完成后自动更新 paper.md`}
-              className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-violet-200 text-violet-700 hover:bg-violet-50 disabled:opacity-50 shrink-0">
-              {rewriting ? (
-                <><span className="animate-spin inline-block">⟳</span> 重写中…</>
+          {/* 编辑 / 重写按钮：仅对 .md 且任务非运行中时显示 */}
+          {selected && /\.md$/i.test(selected) && current.state !== 'running' && (
+            <>
+              {editing ? (
+                <>
+                  <button onClick={onCancelEdit}
+                    className="text-xs px-2.5 py-1 rounded border border-ink-200 text-ink-600 hover:bg-ink-50 shrink-0">
+                    取消
+                  </button>
+                  <button onClick={onSaveEdit} disabled={saving}
+                    className="text-xs px-3 py-1 rounded bg-ink-800 text-white hover:bg-ink-700 disabled:opacity-50 shrink-0">
+                    {saving ? '保存中…' : '保存'}
+                  </button>
+                </>
               ) : (
-                <>✦ 重写此节</>
+                <button onClick={onStartEdit}
+                  className="text-xs px-2.5 py-1 rounded border border-ink-200 text-ink-600 hover:bg-ink-50 shrink-0">
+                  ✎ 编辑
+                </button>
               )}
-            </button>
+              {sectionKey && !editing && (
+                <button onClick={onRewrite} disabled={rewriting}
+                  title="重新用 AI 撰写此节"
+                  className="text-xs px-2.5 py-1 rounded border border-violet-200 text-violet-700 hover:bg-violet-50 disabled:opacity-50 shrink-0">
+                  {rewriting ? <><span className="animate-spin inline-block">⟳</span> 重写中…</> : <>✦ AI 重写</>}
+                </button>
+              )}
+            </>
           )}
         </div>
 
@@ -271,8 +306,18 @@ export function FilesPanel() {
 
         {selected && (
           <div className={clsx('min-h-full', isPaper ? 'p-0' : 'p-5')}>
+            {/* 编辑模式：全屏 textarea */}
+            {editing && isMd && (
+              <textarea
+                value={editContent}
+                onChange={e => setEditContent(e.target.value)}
+                spellCheck={false}
+                className="w-full h-full min-h-[600px] font-mono text-[12px] leading-relaxed p-4 resize-none focus:outline-none bg-white border-0"
+                placeholder="Markdown 内容…"
+              />
+            )}
             {/* Markdown 预览 */}
-            {isMd && (
+            {isMd && !editing && (
               <MdViewer
                 content={content}
                 loading={loading}
