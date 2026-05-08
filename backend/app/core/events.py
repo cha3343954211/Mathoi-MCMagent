@@ -13,6 +13,8 @@ import json
 import time
 import uuid
 from collections import defaultdict
+
+from .logging import logger
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -178,13 +180,26 @@ class EventBus:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass
+                # 慢客户端：丢弃队首旧事件后再尝试一次，保证最新事件能送达
+                try:
+                    q.get_nowait()
+                    q.put_nowait(event)
+                    logger.warning(
+                        "WS subscriber queue overflow, dropped 1 old event | task={}",
+                        event.task_id,
+                    )
+                except Exception:
+                    pass
         # 持久化：入队列由后台批量写入（不再逐条 create_task）
         if event.type not in self._NO_PERSIST:
             try:
                 self._write_queue.put_nowait(event)
             except asyncio.QueueFull:
-                pass  # 队列满时丢弃（罕见）
+                # DB 写队列满 → 持久化掉队，必须可观测
+                logger.warning(
+                    "Event write_queue full ({}), event dropped | task={} type={}",
+                    self._write_queue.maxsize, event.task_id, event.type.value,
+                )
 
     # _save_to_db 已由 _batch_save 替代，保留空实现兼容旧引用
     @staticmethod

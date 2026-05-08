@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     hitl_timeout_hours: float = 24.0  # HITL 等待上限（小时），超时自动 approve
     daily_token_quota: int = 0        # 用户每日 token 上限（0 = 不限）
 
+    # 上传限制（防止恶意/误操作 OOM）
+    max_upload_file_mb: int = 100     # 单文件最大体积（MB）
+    max_upload_total_mb: int = 500    # 单次任务上传总和上限（MB）
+    max_upload_files: int = 20        # 单次任务最多文件数
+
     # OpenAlex 学术搜索（Writer 引用文献用）
     openalex_email: str = ""   # polite pool 必填，空则跳过文献搜索
 

@@ -338,22 +338,74 @@ async def create_task(
     if not title or len(problem) < 10:
         raise HTTPException(400, "title 与 problem（至少 10 字）必填")
 
+    settings = get_settings()
+    real_files = [f for f in files if f and f.filename]
+    if len(real_files) > settings.max_upload_files:
+        raise HTTPException(
+            413, f"上传文件数超过上限（{settings.max_upload_files}）"
+        )
+    per_limit = settings.max_upload_file_mb * 1024 * 1024
+    total_limit = settings.max_upload_total_mb * 1024 * 1024
+
     # 先创建任务（获取 work_dir）
     t = await task_manager.create(user_id=user.id, title=title, problem=problem, data_files=[])
 
     data_saved: list[str] = []
     img_saved:  list[str] = []
     work_dir = Path(t.work_dir)
-    for f in files:
-        if not f.filename:
-            continue
-        safe_name = Path(f.filename).name
-        (work_dir / safe_name).write_bytes(await f.read())
-        is_img = (
-            (f.content_type or "").split(";")[0].strip() in _IMAGE_MIMES
-            or Path(safe_name).suffix.lower() in _IMAGE_EXTS
-        )
-        (img_saved if is_img else data_saved).append(safe_name)
+    saved_paths: list[Path] = []
+    total_bytes = 0
+    CHUNK = 1024 * 1024   # 1MB 分块
+
+    async def _rollback_partial() -> None:
+        """上传失败：删除已落盘文件 + 删任务，避免半成品。"""
+        for p in saved_paths:
+            try: p.unlink(missing_ok=True)
+            except Exception: pass
+        try:
+            await task_manager.delete(t.task_id)
+        except Exception:
+            pass
+
+    try:
+        for f in real_files:
+            safe_name = Path(f.filename).name
+            if not safe_name or safe_name in (".", ".."):
+                continue
+            target = work_dir / safe_name
+            written = 0
+            with target.open("wb") as out:
+                while True:
+                    chunk = await f.read(CHUNK)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > per_limit:
+                        raise HTTPException(
+                            413,
+                            f"文件 {safe_name} 超过单文件上限 "
+                            f"{settings.max_upload_file_mb}MB",
+                        )
+                    if total_bytes + written > total_limit:
+                        raise HTTPException(
+                            413,
+                            f"上传总量超过 {settings.max_upload_total_mb}MB",
+                        )
+                    out.write(chunk)
+            total_bytes += written
+            saved_paths.append(target)
+            is_img = (
+                (f.content_type or "").split(";")[0].strip() in _IMAGE_MIMES
+                or Path(safe_name).suffix.lower() in _IMAGE_EXTS
+            )
+            (img_saved if is_img else data_saved).append(safe_name)
+    except HTTPException:
+        await _rollback_partial()
+        raise
+    except Exception as e:
+        logger.exception("upload failed | task={}", t.task_id)
+        await _rollback_partial()
+        raise HTTPException(500, f"上传失败: {e}")
 
     # 同时更新内存对象和持久化
     t.data_files  = data_saved
@@ -460,6 +512,14 @@ async def retry(task_id: str, user: User = Depends(get_current_user)) -> dict[st
     old_handle = task_manager._task_handles.get(task_id)
     if old_handle and not old_handle.done():
         old_handle.cancel()
+        # 等旧 handle 真正退出，确保 orchestrator 的 finally 块（sandbox stop / unregister）
+        # 跑完，避免新旧两个 sandbox 短暂并存或共享 work_dir 文件锁
+        try:
+            await asyncio.wait_for(old_handle, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+    # 显式释放可能残留的 sandbox（防御性，正常情况下 orchestrator 会自己清）
+    task_manager.unregister_sandbox(task_id)
     # 重置 pause_event（避免新工作流在旧 pause 状态下卡住）
     ev = task_manager._pause_events.get(task_id)
     if ev:
