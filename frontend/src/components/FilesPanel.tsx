@@ -62,7 +62,44 @@ export function FilesPanel() {
   const [content, setContent]   = useState<string>('')
   const [loading, setLoading]   = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)  // 移动端可折叠
+  const [rewriting, setRewriting] = useState(false)
   const prevTaskId = useRef<string>('')
+
+  // 从文件名解析章节 key（sec_abstract.md → abstract，sec_q1.md → q1）
+  const sectionKey = (() => {
+    if (!selected) return null
+    const m = selected.match(/^sec_(.+)\.md$/)
+    if (!m) return null
+    const k = m[1]   // abstract | restatement | q1 | ...
+    return k
+  })()
+
+  const onRewrite = async () => {
+    if (!current || !sectionKey || rewriting) return
+    if (!confirm(`确定重写「${selected}」？当前内容将被新版本替换。`)) return
+    setRewriting(true)
+    try {
+      await api.rewriteSection(current.task_id, sectionKey)
+      // 任务变为 running，等 task.completed 事件后自动刷新文件列表
+    } catch (e: any) {
+      alert('重写失败：' + (e?.message || e))
+      setRewriting(false)
+    }
+  }
+
+  // 重写完成后重新加载文件内容
+  const { current: currentTask } = useStore()
+  useEffect(() => {
+    if (!rewriting) return
+    if (currentTask?.state === 'completed' || currentTask?.state === 'failed') {
+      setRewriting(false)
+      // 重新触发文件内容加载
+      if (selected && /\.md$/i.test(selected)) {
+        fetch(api.fileUrl(currentTask.task_id, selected))
+          .then(r => r.text()).then(setContent).catch(() => {})
+      }
+    }
+  }, [currentTask?.state, rewriting])
 
   // 文件列表刷新
   useEffect(() => {
@@ -202,7 +239,21 @@ export function FilesPanel() {
             {sidebarOpen ? '隐藏列表' : `文件列表${files.length > 0 ? ` (${files.length})` : ''}`}
           </button>
           {selected && (
-            <span className="text-xs text-ink-500 truncate">{selected}</span>
+            <span className="text-xs text-ink-500 truncate flex-1">{selected}</span>
+          )}
+          {/* 重写此节按钮：仅对 sec_*.md 且任务非运行中时显示 */}
+          {sectionKey && current.state !== 'running' && (
+            <button
+              onClick={onRewrite}
+              disabled={rewriting}
+              title={`重新用 AI 撰写「${selected}」，完成后自动更新 paper.md`}
+              className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-violet-200 text-violet-700 hover:bg-violet-50 disabled:opacity-50 shrink-0">
+              {rewriting ? (
+                <><span className="animate-spin inline-block">⟳</span> 重写中…</>
+              ) : (
+                <>✦ 重写此节</>
+              )}
+            </button>
           )}
         </div>
 

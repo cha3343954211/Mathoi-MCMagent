@@ -404,6 +404,41 @@ async def cancel(task_id: str, user: User = Depends(get_current_user)) -> dict[s
     return {"ok": True}
 
 
+@router.post("/tasks/{task_id}/rewrite-section")
+async def rewrite_section(
+    task_id: str,
+    body: dict[str, Any],
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """重写指定 Writer 章节，完成后自动重组 paper.md。
+
+    body: { "section": "abstract" | "restatement" | "analysis" |
+                        "assumptions" | "symbol" | "eda" |
+                        "q1" | "q2" | ... | "sensitivity" | "evaluation" }
+    """
+    t = task_manager.get(task_id); _ensure_owner_or_admin(t, user)
+    if t.state == TaskState.RUNNING:
+        raise HTTPException(400, "任务正在运行，请等待完成后再重写章节")
+
+    section_key = (body.get("section") or "").strip().lower()
+    if not section_key:
+        raise HTTPException(422, "缺少 section 字段")
+
+    from ..workflow.rewrite import run_rewrite_section, SECTION_MAP as _SM
+    valid = set(_SM.keys()) | {f"q{i}" for i in range(1, 10)}
+    if section_key not in valid:
+        raise HTTPException(422, f"不支持的章节 key: {section_key}")
+
+    # 异步后台执行（与主流程一致）
+    import asyncio
+    handle = asyncio.create_task(
+        run_rewrite_section(task_id, section_key, user.id),
+        name=f"rewrite-{task_id}-{section_key}",
+    )
+    task_manager._task_handles[task_id] = handle
+    return {"ok": True, "section": section_key}
+
+
 @router.post("/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """向当前正在执行代码的 Kernel 发送中断信号，停止死循环。"""

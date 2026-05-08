@@ -843,3 +843,16 @@ def _ensure_all_figures_in_paper(paper_md: Path, catalog: list[dict]) -> None:
         lines.insert(pos + 1, text)
 
     paper_md.write_text("\n".join(lines), encoding="utf-8")
+
+
+# 固定章节 key → (sec 文件名, phase 标识)，供 rewrite.py 导入
+SECTION_MAP: dict[str, tuple[str, str]] = {
+    "abstract":    ("sec_abstract.md",    "writer:abstract"),
+    "restatement": ("sec_restatement.md", "writer:restatement"),
+    "analysis":    ("sec_analysis.md",    "writer:analysis"),
+    "assumptions": ("sec_assumptions.md", "writer:assumptions"),
+    "symbol":      ("sec_symbol.md",      "writer:symbol"),
+    "eda":         ("sec_eda.md",         "writer:eda"),
+    "sensitivity": ("sec_sensitivity.md", "writer:sensitivity"),
+    "evaluation":  ("sec_evaluation.md",  "writer:evaluation"),
+}
