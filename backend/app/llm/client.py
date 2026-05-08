@@ -196,10 +196,10 @@ async def chat_for_user(
     # 熔断器检查（open 状态直接抛出，不发 LLM 请求）
     _cb_check(user_id, agent)
 
-    # 日额配额检查（0 = 不限制）
-    _quota = get_settings().daily_token_quota
+    # 日额配额检查（DB 优先，0 = 不限制）
+    from ..services.usage_service import get_effective_daily_quota, get_user_today_tokens
+    _quota = await get_effective_daily_quota()
     if _quota > 0:
-        from ..services.usage_service import get_user_today_tokens
         _today = await get_user_today_tokens(user_id)
         if _today >= _quota:
             raise LLMError(

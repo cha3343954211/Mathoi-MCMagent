@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 
 from ..agents import CoderAgent, CoordinatorAgent, ModelerAgent, WriterAgent
@@ -794,7 +795,6 @@ def _ensure_all_figures_in_paper(paper_md: Path, catalog: list[dict]) -> None:
     logger.warning("paper.md 遗漏 {} 张图，尝试就近追加", len(missing_entries))
 
     # 按问题分组
-    from collections import defaultdict
     groups: dict[int, list[dict]] = defaultdict(list)
     for e in missing_entries:
         groups[e["question"]].append(e)

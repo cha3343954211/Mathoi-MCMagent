@@ -9,6 +9,10 @@ from typing import Any, Optional
 _quota_cache: dict[int, tuple[int, float]] = {}
 _QUOTA_CACHE_TTL = 60.0   # 缓存 60 秒
 
+# 全局配额限制缓存（DB 值优先于 env，5min TTL）
+_quota_limit_cache: tuple[int, float] | None = None
+_QUOTA_LIMIT_TTL = 300.0  # 5 分钟
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -205,11 +209,44 @@ async def get_user_today_tokens(user_id: int) -> int:
 
 
 def invalidate_quota_cache(user_id: int | None = None) -> None:
-    """配额变更后清除缓存。"""
+    """配额变更后清除缓存（包括限额缓存）。"""
+    global _quota_limit_cache
+    _quota_limit_cache = None          # 总是清除限额缓存
     if user_id is None:
         _quota_cache.clear()
     else:
         _quota_cache.pop(user_id, None)
+
+
+async def get_effective_daily_quota() -> int:
+    """返回当前生效的每日 token 配额（DB 优先，回退 env）。0 = 不限制。
+
+    结果缓存 5 分钟，避免每次 LLM 调用都查 DB。
+    管理员更新配额后调用 invalidate_quota_cache() 可立即生效。
+    """
+    global _quota_limit_cache
+    now = time.time()
+    if _quota_limit_cache is not None and _quota_limit_cache[1] > now:
+        return _quota_limit_cache[0]
+
+    val: int
+    try:
+        from ..db.models import SystemSetting
+        async with AsyncSessionLocal() as _s:
+            row = (await _s.execute(
+                select(SystemSetting).where(SystemSetting.key == "daily_token_quota")
+            )).scalar_one_or_none()
+        if row and row.value.strip():
+            val = max(0, int(row.value))
+        else:
+            from ..core.config import get_settings
+            val = get_settings().daily_token_quota
+    except Exception:
+        from ..core.config import get_settings
+        val = get_settings().daily_token_quota
+
+    _quota_limit_cache = (val, now + _QUOTA_LIMIT_TTL)
+    return val
 
 
 async def stats_for_user(session: AsyncSession, user_id: int, limit: int = 100) -> dict[str, Any]:

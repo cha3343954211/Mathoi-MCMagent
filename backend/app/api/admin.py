@@ -567,4 +567,8 @@ async def update_system_settings(body: SettingsUpdate, session: AsyncSession = D
             row.value = value or ""
             row.updated_at = time.time()
     await session.commit()
+    # 清除配额相关缓存（DB 值立即生效，无需等待 TTL）
+    if "daily_token_quota" in updates:
+        from ..services.usage_service import invalidate_quota_cache
+        invalidate_quota_cache()
     return await get_system_settings(session)
