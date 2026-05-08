@@ -98,6 +98,19 @@ _CJK_PREFER = [
 _installed_names = {f.name for f in _fm.fontManager.ttflist}
 _cjk_font = next((f for f in _CJK_PREFER if f in _installed_names), None)
 
+# 检测到候选名后立即清除 _findfont_cached（旧缓存可能包含 "not found" 条目）
+if _cjk_font:
+    try: _fm.fontManager._findfont_cached.cache_clear()
+    except Exception: pass
+    # 验证 findfont() 实际能解析（通过 logging 捕获不到 not-found，改用返回值判断）
+    import warnings as _warnings
+    with _warnings.catch_warnings(record=True):
+        _warnings.simplefilter('always')
+        _probe = _fm.findfont(_cjk_font)
+    if not _probe or 'dejavu' in _probe.lower():
+        # findfont 仍回退到 DejaVu Sans：说明系统缓存陈旧，让文件扫描兜底
+        _cjk_font = None
+
 if _cjk_font is None:
     _CJK_FILE_KW = (
         'simhei','simsun','simfang','simkai','kaiti','fangsong',
@@ -250,8 +263,11 @@ class JupyterSandbox:
                 _cjk_preamble = _make_cjk_preamble()
                 _init_result = await self._silent_exec(
                     "import os, sys, json, gc\n"
-                    "import warnings\n"
+                    "import warnings, logging\n"
                     "warnings.filterwarnings('ignore')\n"
+                    # matplotlib.font_manager 通过 logging 而非 warnings 发出告警，
+                    # 单独压制，防止 'findfont: Font family ... not found' 污染 stderr
+                    "logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)\n"
                     "import matplotlib\n"
                     "matplotlib.use('Agg')\n"
                     "import matplotlib.pyplot as plt\n"
