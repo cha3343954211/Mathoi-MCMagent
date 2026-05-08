@@ -236,6 +236,14 @@ class JupyterSandbox:
         self._lock = asyncio.Lock()
         self._interrupt_requested: bool = False  # 用户发起的中断标志
 
+    async def _check_paused(self) -> None:
+        """若任务被暂停则阻塞，直到恢复或取消。不中断内核，仅暂停消息处理。"""
+        try:
+            from ..tasks.manager import task_manager  # 懒导入，避免循环依赖
+            await task_manager.wait_if_paused(self.task_id)
+        except Exception:
+            pass
+
     async def interrupt(self) -> None:
         """中断当前正在执行的代码（等价于 Jupyter 的 '■ Stop' 按钮）。"""
         self._interrupt_requested = True
@@ -465,6 +473,8 @@ class JupyterSandbox:
 
     async def execute(self, code: str, *, timeout: Optional[int] = None, emit_events: bool = True) -> ExecResult:
         """执行一段代码，返回结构化结果。执行前检测内核存活，崩溃则自动重启。"""
+        # 执行前检查：若任务已被暂停，等待恢复后再发起新 cell
+        await self._check_paused()
         async with self._lock:
             # 检测内核是否还活着，死亡则重启
             if self._km is not None:
@@ -500,8 +510,14 @@ class JupyterSandbox:
                 except Exception:
                     pass
                 break
+            # 暂停检查：每轮循环前检查，确保 pause 能在 1s 内生效
+            await self._check_paused()
             try:
-                msg = await asyncio.wait_for(self._kc.get_iopub_msg(), timeout=remaining)
+                # 封顶 1s，保证暂停请求能在下一轮被及时响应
+                msg = await asyncio.wait_for(
+                    self._kc.get_iopub_msg(),
+                    timeout=min(remaining, 1.0),
+                )
             except asyncio.TimeoutError:
                 continue
             if msg.get("parent_header", {}).get("msg_id") != msg_id:
