@@ -34,6 +34,8 @@ _RATE_RULES = [
 ]
 # ip -> deque[(timestamp, path_prefix)]
 _rate_window: dict[str, deque] = defaultdict(deque)
+_RATE_MAX_IPS = 50000      # 全局 IP 上限，超出时强制收缩
+_rate_last_gc: float = 0.0  # 上次清理时间戳
 
 
 def _get_client_ip(request: Request) -> str:
@@ -41,6 +43,28 @@ def _get_client_ip(request: Request) -> str:
     if xff:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def _rate_window_gc(now: float) -> None:
+    """周期回收 _rate_window：120s 一次，删除完全空的 deque；
+    超出 _RATE_MAX_IPS 时按队首时间升序强制裁剪。"""
+    global _rate_last_gc
+    if now - _rate_last_gc < 120:
+        return
+    _rate_last_gc = now
+    # 1) 清空 deque
+    empties = [ip for ip, q in _rate_window.items() if not q or now - q[-1][0] > 120]
+    for ip in empties:
+        _rate_window.pop(ip, None)
+    # 2) 总量兜底
+    if len(_rate_window) > _RATE_MAX_IPS:
+        ordered = sorted(
+            _rate_window.items(),
+            key=lambda kv: (kv[1][0][0] if kv[1] else 0.0),
+        )
+        excess = len(_rate_window) - _RATE_MAX_IPS
+        for ip, _ in ordered[:excess]:
+            _rate_window.pop(ip, None)
 
 
 async def _rate_limit_middleware(request: Request, call_next):
@@ -51,6 +75,7 @@ async def _rate_limit_middleware(request: Request, call_next):
 
     ip = _get_client_ip(request)
     now = time.time()
+    _rate_window_gc(now)
     q = _rate_window[ip]
 
     # 淘汰过期记录（超过最大窗口 60s）

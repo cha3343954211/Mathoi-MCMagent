@@ -50,8 +50,9 @@ def build_default_registry(sandbox: JupyterSandbox, work_dir: Path) -> ToolRegis
 
     # ---- write_file ----
     async def write_file(path: str, content: str) -> dict[str, Any]:
+        wd_resolved = work_dir.resolve()
         target = (work_dir / path).resolve()
-        if not str(target).startswith(str(work_dir.resolve())):
+        if not (target == wd_resolved or target.is_relative_to(wd_resolved)):
             return {"success": False, "error": "path escape forbidden"}
         target.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(target, "w", encoding="utf-8") as f:
@@ -78,8 +79,9 @@ def build_default_registry(sandbox: JupyterSandbox, work_dir: Path) -> ToolRegis
 
     # ---- read_file ----
     async def read_file(path: str, max_chars: int = 8000) -> dict[str, Any]:
+        wd_resolved = work_dir.resolve()
         target = (work_dir / path).resolve()
-        if not str(target).startswith(str(work_dir.resolve())):
+        if not (target == wd_resolved or target.is_relative_to(wd_resolved)):
             return {"success": False, "error": "path escape forbidden"}
         if not target.exists():
             return {"success": False, "error": "file not found"}
@@ -113,8 +115,9 @@ def build_default_registry(sandbox: JupyterSandbox, work_dir: Path) -> ToolRegis
 
     # ---- list_files ----
     async def list_files(subdir: str = ".") -> dict[str, Any]:
+        wd_resolved = work_dir.resolve()
         target = (work_dir / subdir).resolve()
-        if not str(target).startswith(str(work_dir.resolve())) or not target.exists():
+        if not (target == wd_resolved or target.is_relative_to(wd_resolved)) or not target.exists():
             return {"success": False, "files": []}
         entries = []
         for p in sorted(target.iterdir()):
@@ -192,8 +195,9 @@ def build_writer_registry(work_dir: Path, openalex_email: str = "") -> ToolRegis
 
     # ---- read_file ----
     async def read_file(path: str, max_chars: int = 8000) -> dict[str, Any]:
+        wd_resolved = work_dir.resolve()
         target = (work_dir / path).resolve()
-        if not str(target).startswith(str(work_dir.resolve())):
+        if not (target == wd_resolved or target.is_relative_to(wd_resolved)):
             return {"success": False, "error": "path escape forbidden"}
         if not target.exists():
             return {"success": False, "error": "file not found"}
@@ -217,8 +221,9 @@ def build_writer_registry(work_dir: Path, openalex_email: str = "") -> ToolRegis
 
     # ---- write_file ----
     async def write_file(path: str, content: str) -> dict[str, Any]:
+        wd_resolved = work_dir.resolve()
         target = (work_dir / path).resolve()
-        if not str(target).startswith(str(work_dir.resolve())):
+        if not (target == wd_resolved or target.is_relative_to(wd_resolved)):
             return {"success": False, "error": "path escape forbidden"}
         target.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(target, "w", encoding="utf-8") as f:

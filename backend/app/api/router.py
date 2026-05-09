@@ -520,13 +520,14 @@ async def rewrite_section(
     if section_key not in valid:
         raise HTTPException(422, f"不支持的章节 key: {section_key}")
 
-    # 异步后台执行（与主流程一致）
+    # 异步后台执行（与主流程一致）。用 attach_handle 以获得 done_callback 自动清理引用，
+    # 避免 _task_handles 累积重写任务的死引用。
     import asyncio
     handle = asyncio.create_task(
         run_rewrite_section(task_id, section_key, user.id),
         name=f"rewrite-{task_id}-{section_key}",
     )
-    task_manager._task_handles[task_id] = handle
+    task_manager.attach_handle(task_id, handle)
     return {"ok": True, "section": section_key}
 
 
@@ -615,7 +616,8 @@ async def get_file(task_id: str, path: str, user: User = Depends(get_current_use
     t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir).resolve()
     target = (wd / path).resolve()
-    if not str(target).startswith(str(wd)) or not target.exists():
+    # 防 prefix-only 旁路（如 /work/abc-evil 误命中 /work/abc 前缀）：必须真正在 wd 子树内
+    if not (target == wd or target.is_relative_to(wd)) or not target.exists():
         raise HTTPException(404)
     return FileResponse(target)
 
@@ -634,10 +636,10 @@ async def write_file(
     if t.state == TaskState.RUNNING:
         raise HTTPException(400, "任务正在运行，请等待完成后再编辑")
 
-    # 路径安全检查
+    # 路径安全检查（防 prefix-only 旁路）
     wd = Path(t.work_dir).resolve()
     target = (wd / path).resolve()
-    if not str(target).startswith(str(wd)):
+    if not (target == wd or target.is_relative_to(wd)):
         raise HTTPException(403, "非法路径")
 
     allowed_ext = {".md", ".txt", ".py"}
@@ -769,7 +771,7 @@ async def export_ipynb(task_id: str, path: str, user: User = Depends(get_current
     t = await task_manager.get_or_load(task_id); _ensure_owner_or_admin(t, user)
     wd = Path(t.work_dir).resolve()
     target = (wd / path).resolve()
-    if not str(target).startswith(str(wd)) or not target.exists():
+    if not (target == wd or target.is_relative_to(wd)) or not target.exists():
         raise HTTPException(404, "文件不存在")
     if target.suffix.lower() != ".py":
         raise HTTPException(400, "仅支持 .py 文件转换为 .ipynb")
