@@ -856,7 +856,8 @@ async def ws_task(ws: WebSocket, task_id: str) -> None:
         await ws.close(code=4403); return
 
     await ws.accept()
-    queue = await bus.subscribe(task_id)
+    since_event_id = ws.query_params.get("since") or ws.query_params.get("since_event_id") or None
+    queue = await bus.subscribe(task_id, since_event_id=since_event_id)
     try:
         while True:
             if _ws_is_closed(ws):

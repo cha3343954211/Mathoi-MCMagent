@@ -222,6 +222,9 @@ class ExecResult:
 _KERNEL_START_TIMEOUT = 90   # wait_for_ready 超时（秒）
 _KERNEL_START_RETRIES = 3    # 最大重试次数
 _KERNEL_RETRY_DELAY  = 3     # 重试间隔（秒）
+_KERNEL_HEALTH_INTERVAL = 60.0  # 后台健康检查间隔（秒）
+_KERNEL_HEALTH_TIMEOUT = 5.0    # is_alive 单次超时（秒）
+_KERNEL_HEALTH_MAX_FAILS = 2    # 连续失败多少次后重启
 
 
 class JupyterSandbox:
@@ -238,6 +241,7 @@ class JupyterSandbox:
         self._interrupt_requested: bool = False  # 用户发起的中断标志
         self._notebook: NotebookRecorder = NotebookRecorder()
         self._notebook_path: Path = self.work_dir / "notebook.ipynb"
+        self._health_task: Optional[asyncio.Task] = None
 
     async def _check_paused(self) -> None:
         """若任务被暂停则阻塞，直到恢复或取消。不中断内核，仅暂停消息处理。"""
@@ -404,6 +408,7 @@ class JupyterSandbox:
                             break
                 logger.info("Sandbox started (attempt {}) | task={} cwd={}",
                             attempt, self.task_id, self.work_dir)
+                self._start_health_worker()
                 return  # 成功
             except Exception as e:
                 last_exc = e
@@ -418,6 +423,17 @@ class JupyterSandbox:
 
     async def _cleanup(self) -> None:
         """彻底关闭当前 km/kc，忽略所有异常。"""
+        current = asyncio.current_task()
+        # 若由健康检查协程自身触发重启，不能 cancel/await 自己；否则会自等待死锁。
+        if self._health_task and not self._health_task.done() and self._health_task is not current:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._health_task = None
         # 先摘引用，再操作，避免重入
         kc, km = self._kc, self._km
         self._kc = None
@@ -435,6 +451,50 @@ class JupyterSandbox:
 
     async def stop(self) -> None:
         await self._cleanup()
+
+    def _start_health_worker(self) -> None:
+        """启动后台 Kernel 健康检查。"""
+        if self._health_task is None or self._health_task.done():
+            self._health_task = asyncio.create_task(self._health_worker())
+
+    async def _health_worker(self) -> None:
+        """定期检测 Kernel 存活；空闲时连续失败自动重启。"""
+        fails = 0
+        while True:
+            try:
+                await asyncio.sleep(_KERNEL_HEALTH_INTERVAL)
+                await self._check_paused()
+                # 正在执行代码时跳过健康检查，避免与 execute 的 ZMQ 消息读取互相干扰
+                if self._lock.locked():
+                    continue
+                km = self._km
+                if km is None:
+                    continue
+                alive = await asyncio.wait_for(km.is_alive(), timeout=_KERNEL_HEALTH_TIMEOUT)
+                if alive:
+                    fails = 0
+                    continue
+                fails += 1
+                logger.warning("Kernel health check failed {}/{} | task={}",
+                               fails, _KERNEL_HEALTH_MAX_FAILS, self.task_id)
+                if fails >= _KERNEL_HEALTH_MAX_FAILS:
+                    async with self._lock:
+                        logger.warning("Kernel unhealthy, restarting | task={}", self.task_id)
+                        await self._restart_kernel()
+                    fails = 0
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                fails += 1
+                logger.warning("Kernel health check error {}/{}: {} | task={}",
+                               fails, _KERNEL_HEALTH_MAX_FAILS, e, self.task_id)
+                if fails >= _KERNEL_HEALTH_MAX_FAILS and not self._lock.locked():
+                    try:
+                        async with self._lock:
+                            await self._restart_kernel()
+                        fails = 0
+                    except Exception as re:
+                        logger.warning("Kernel health restart failed: {} | task={}", re, self.task_id)
 
     async def _restart_kernel(self) -> None:
         """执行中发现内核崩溃时，原地重启。"""

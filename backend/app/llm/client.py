@@ -65,6 +65,35 @@ async def _with_timeout(coro, timeout_secs: int):
     return await coro
 
 
+class _StreamChunkBatcher:
+    """将高频 token chunk 合并为约 50ms 一次推送，降低 WS/EventBus 压力。"""
+
+    def __init__(self, task_id: Optional[str], agent: str, *, interval: float = 0.05) -> None:
+        self.task_id = task_id
+        self.agent = agent
+        self.interval = interval
+        self._buf: list[str] = []
+        self._last_flush = 0.0
+
+    async def push(self, delta: str) -> None:
+        if not self.task_id or not delta:
+            return
+        self._buf.append(delta)
+        now = asyncio.get_running_loop().time()
+        if self._last_flush <= 0:
+            self._last_flush = now
+        if now - self._last_flush >= self.interval:
+            await self.flush()
+
+    async def flush(self) -> None:
+        if not self.task_id or not self._buf:
+            return
+        delta = "".join(self._buf)
+        self._buf.clear()
+        self._last_flush = asyncio.get_running_loop().time()
+        await emit_event(EventType.AGENT_STREAM_CHUNK, self.task_id, agent=self.agent, delta=delta)
+
+
 def _retry_after_seconds(exc: Exception) -> float:
     """从 429 响应中提取 Retry-After 头（秒），不存在则返回 0。"""
     try:
@@ -403,38 +432,40 @@ async def _stream_chunks_openai(
         full_content = ""
         tool_calls_acc: dict[int, dict] = {}
         usage_obj = None
+        batcher = _StreamChunkBatcher(task_id, agent_name)
 
         stream = await client.chat.completions.create(**params)
-        async for chunk in stream:
-            # 流式 chunk 级别的暂停检查：用户暂停后不再推送下一个 token
-            if task_id:
-                try:
-                    from ..tasks.manager import task_manager
-                    await task_manager.wait_if_paused(task_id)
-                except Exception:
-                    pass
-            if getattr(chunk, "usage", None):
-                usage_obj = chunk.usage
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                full_content += delta.content
+        try:
+            async for chunk in stream:
+                # 流式 chunk 级别的暂停检查：用户暂停后不再推送下一个 token
                 if task_id:
-                    await emit_event(EventType.AGENT_STREAM_CHUNK, task_id,
-                                     agent=agent_name, delta=delta.content)
-            for tc in (getattr(delta, "tool_calls", None) or []):
-                i = tc.index
-                if i not in tool_calls_acc:
-                    tool_calls_acc[i] = {"id": "", "type": "function",
-                                         "function": {"name": "", "arguments": ""}}
-                if tc.id:
-                    tool_calls_acc[i]["id"] = tc.id
-                if tc.function:
-                    if tc.function.name:
-                        tool_calls_acc[i]["function"]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        tool_calls_acc[i]["function"]["arguments"] += tc.function.arguments
+                    try:
+                        from ..tasks.manager import task_manager
+                        await task_manager.wait_if_paused(task_id)
+                    except Exception:
+                        pass
+                if getattr(chunk, "usage", None):
+                    usage_obj = chunk.usage
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    full_content += delta.content
+                    await batcher.push(delta.content)
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    i = tc.index
+                    if i not in tool_calls_acc:
+                        tool_calls_acc[i] = {"id": "", "type": "function",
+                                             "function": {"name": "", "arguments": ""}}
+                    if tc.id:
+                        tool_calls_acc[i]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_acc[i]["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_acc[i]["function"]["arguments"] += tc.function.arguments
+        finally:
+            await batcher.flush()
 
         tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
         return {
@@ -520,40 +551,42 @@ async def _call_litellm_streaming(
         full_content = ""
         tool_calls_acc: dict[int, dict] = {}
         usage_obj = None
+        batcher = _StreamChunkBatcher(task_id, agent_name)
 
-        async for chunk in stream:
-            # 流式 chunk 级别的暂停检查
-            if task_id:
+        try:
+            async for chunk in stream:
+                # 流式 chunk 级别的暂停检查
+                if task_id:
+                    try:
+                        from ..tasks.manager import task_manager
+                        await task_manager.wait_if_paused(task_id)
+                    except Exception:
+                        pass
                 try:
-                    from ..tasks.manager import task_manager
-                    await task_manager.wait_if_paused(task_id)
+                    if getattr(chunk, "usage", None):
+                        usage_obj = chunk.usage
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    delta = chunk.choices[0].delta
+                    content = getattr(delta, "content", None) or ""
+                    if content:
+                        full_content += content
+                        await batcher.push(content)
+                    for tc in (getattr(delta, "tool_calls", None) or []):
+                        i = getattr(tc, "index", 0)
+                        if i not in tool_calls_acc:
+                            tool_calls_acc[i] = {"id": "", "type": "function",
+                                                 "function": {"name": "", "arguments": ""}}
+                        if getattr(tc, "id", None):
+                            tool_calls_acc[i]["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn:
+                            tool_calls_acc[i]["function"]["name"] += getattr(fn, "name", "") or ""
+                            tool_calls_acc[i]["function"]["arguments"] += getattr(fn, "arguments", "") or ""
                 except Exception:
-                    pass
-            try:
-                if getattr(chunk, "usage", None):
-                    usage_obj = chunk.usage
-                if not getattr(chunk, "choices", None):
                     continue
-                delta = chunk.choices[0].delta
-                content = getattr(delta, "content", None) or ""
-                if content:
-                    full_content += content
-                    if task_id:
-                        await emit_event(EventType.AGENT_STREAM_CHUNK, task_id,
-                                         agent=agent_name, delta=content)
-                for tc in (getattr(delta, "tool_calls", None) or []):
-                    i = getattr(tc, "index", 0)
-                    if i not in tool_calls_acc:
-                        tool_calls_acc[i] = {"id": "", "type": "function",
-                                             "function": {"name": "", "arguments": ""}}
-                    if getattr(tc, "id", None):
-                        tool_calls_acc[i]["id"] = tc.id
-                    fn = getattr(tc, "function", None)
-                    if fn:
-                        tool_calls_acc[i]["function"]["name"] += getattr(fn, "name", "") or ""
-                        tool_calls_acc[i]["function"]["arguments"] += getattr(fn, "arguments", "") or ""
-            except Exception:
-                continue
+        finally:
+            await batcher.flush()
 
         tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
         usage_dict: dict[str, Any] = {}

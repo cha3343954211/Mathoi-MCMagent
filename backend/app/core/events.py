@@ -272,13 +272,21 @@ class EventBus:
             self._db_loaded.discard(tid)
 
     # ---- subscribe ------------------------------------------------------
-    async def subscribe(self, task_id: str) -> asyncio.Queue:
+    async def subscribe(self, task_id: str, *, since_event_id: str | None = None) -> asyncio.Queue:
         # 先确保内存有历史（服务重启场景）
         await self._load_from_db(task_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=2048)
         async with self._lock:
             self._subscribers[task_id].append(q)
-            for ev in self._history.get(task_id, []):
+            history = self._history.get(task_id, [])
+            if since_event_id:
+                # 断点续传：只补发 since 之后的事件；找不到该 event_id 时不补发历史，
+                # 避免客户端重连后收到大量重复事件。
+                start = next((i + 1 for i, ev in enumerate(history) if ev.event_id == since_event_id), len(history))
+                replay = history[start:]
+            else:
+                replay = history
+            for ev in replay:
                 try:
                     q.put_nowait(ev)
                 except asyncio.QueueFull:
