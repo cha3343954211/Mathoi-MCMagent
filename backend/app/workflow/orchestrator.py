@@ -575,32 +575,96 @@ def _collect_coder_reports(work_dir: Path, ques_count: int) -> str:
     return "\n\n".join(parts) if parts else "（暂无 Coder 报告）"
 
 
+_FIGURE_META_FILE = "figures.jsonl"
+
+
+def _scope_to_question(scope: str) -> int:
+    """sandbox 元数据 scope → question 编号（与命名规范保持一致）。"""
+    s = (scope or "").strip().lower()
+    if s in ("", "eda"):
+        return 0 if s == "eda" else -2  # -2 = 无 scope，留待文件名推断
+    if s == "sensitivity":
+        return -1
+    if s.startswith("q") and s[1:].isdigit():
+        return int(s[1:])
+    return -2
+
+
+def _question_from_filename(fname: str) -> int:
+    """文件名兜底推断（与原版逻辑保持一致）。"""
+    name = fname.lower()
+    if name.startswith("fig_eda"):
+        return 0
+    if name.startswith("fig_sens"):
+        return -1
+    m = re.match(r"fig_q(\d+)", name)
+    if m:
+        return int(m.group(1))
+    return 0   # 未识别归到 EDA
+
+
+def _load_figure_metadata(work_dir: Path) -> dict[str, dict]:
+    """读取 sandbox 内 save_fig() 写入的 figures.jsonl，返回 {file → meta}。
+
+    格式：每行一个 JSON 对象 {"file": "fig_q1_x.png", "scope": "q1", "caption": "...", "ts": ...}
+    后写覆盖前写（同名图重画时取最新 caption/scope）。文件不存在或解析失败返回空 dict。
+    """
+    meta_file = work_dir / _FIGURE_META_FILE
+    if not meta_file.exists():
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        for line in meta_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            f = str(rec.get("file") or "").strip()
+            if not f:
+                continue
+            # 只取 basename，统一小写
+            f = f.replace("\\", "/").rsplit("/", 1)[-1]
+            out[f.lower()] = rec
+    except Exception as e:
+        logger.warning("figures.jsonl read failed: {}", e)
+    return out
+
+
 def _build_figure_catalog(work_dir: Path) -> list[dict]:
     """
-    扫描工作区所有图片，根据命名规范推断所属问题编号。
-    命名规范：
-      - fig_eda_xxx.png  → question=0（EDA）
-      - fig_q1_xxx.png   → question=1
-      - fig_sens_xxx.png → question=-1（敏感性）
-    返回 list[{index, file, question, caption}]
+    扫描工作区图片 + figures.jsonl 元数据，构建图表目录。
+
+    优先级：
+    1. figures.jsonl 中的 scope/caption（由 sandbox save_fig() 写入）
+    2. 文件名前缀推断（兼容旧任务、Coder 直接 plt.savefig 的情况）
+
+    返回 list[{index, file, question, caption}]。
     """
     existing = [
         p for p in work_dir.iterdir()
         if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
     ]
+    metadata = _load_figure_metadata(work_dir)
+
     catalog: list[dict] = []
     for p in existing:
         fname = p.name
-        qn = 0
-        if fname.startswith("fig_eda"):
-            qn = 0
-        elif fname.startswith("fig_sens"):
-            qn = -1
+        meta = metadata.get(fname.lower())
+        # 1) scope
+        if meta:
+            qn = _scope_to_question(meta.get("scope", ""))
+            if qn == -2:   # 元数据有但 scope 无效，回退文件名
+                qn = _question_from_filename(fname)
         else:
-            m = re.match(r"fig_q(\d+)", fname)
-            if m:
-                qn = int(m.group(1))
-        caption = fname.rsplit(".", 1)[0].replace("_", " ")
+            qn = _question_from_filename(fname)
+        # 2) caption：元数据优先，否则用文件名美化
+        if meta and (meta.get("caption") or "").strip():
+            caption = meta["caption"].strip()
+        else:
+            caption = fname.rsplit(".", 1)[0].replace("_", " ")
         catalog.append({"file": fname, "question": qn, "caption": caption})
 
     catalog.sort(key=lambda e: (e["question"] if e["question"] >= 0 else 999, e["file"]))

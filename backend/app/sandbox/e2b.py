@@ -79,14 +79,13 @@ class E2BSandbox:
         # 上传工作区现有数据文件
         await self._upload_data_files()
 
-        # 初始化 matplotlib 环境（与本地内核保持一致）
-        init_code = (
-            "import warnings, os\n"
-            "warnings.filterwarnings('ignore')\n"
-            "import matplotlib\n"
-            "matplotlib.use('Agg')\n"
-            "import matplotlib.pyplot as plt\n"
-            "import numpy as np, pandas as pd\n"
+        # 初始化 matplotlib 环境（与本地内核保持一致）：
+        # 复用 jupyter sandbox 的预热代码（CJK 探测 + rcParams + save_fig 元数据）
+        from .preamble import build_init_code
+        init_code = build_init_code(
+            "/home/user",     # E2B 容器内的工作目录
+            hint_font="",     # E2B 镜像内字体每次都现扫一遍即可
+            hint_path="",
         )
         await self._sbx.run_code(init_code)
         logger.info("E2B sandbox ready | task={}", self.task_id)

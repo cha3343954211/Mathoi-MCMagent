@@ -309,7 +309,14 @@ fig, axes = plt.subplots(1, 2, figsize=FIG_DOUBLE)  # 多子图时
 
 **❹ 保存统一用 save_fig()，禁止 plt.show()：**
 ```python
-save_fig('fig_q1_trend.png')       # 自动 dpi=300, bbox_inches=tight
+# 推荐写法（带 scope + caption，自动写入 figures.jsonl 元数据）：
+save_fig('fig_q1_trend.png', scope='q1', caption='问题1预测结果')
+# scope 可选 'eda' / 'q1' .. 'qN' / 'sensitivity'；省略时按文件名推断
+# caption 可选，会作为 Writer 撰写图注的依据
+
+# 简写：仅文件名（自动从命名前缀推断 scope）
+save_fig('fig_eda_corr.png')
+
 # 等价于（不推荐手写）：
 plt.savefig('fig_q1_trend.png', dpi=300, bbox_inches='tight', facecolor='white')
 plt.close('all')

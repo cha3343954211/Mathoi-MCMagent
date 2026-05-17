@@ -24,10 +24,10 @@ from ..core.config import get_settings
 from ..core.events import EventType, emit
 from ..core.logging import logger
 from .notebook import NotebookRecorder
+from .preamble import build_init_code
+from .preamble.loader import parse_cjk_marker
 
-# ---------- CJK 字体缓存 ----------
-# 缓存仅作 "提示"：每次仍在 kernel 内验证字体能被 findfont() 真正解析；
-# 验证失败立即降级到完整扫描，确保不会出现"缓存生效但中文渲染成豆腐方块"的情况。
+# ---------- CJK 字体缓存（hint，仅作提示，kernel 内仍验证）----------
 _FONT_CACHE_TTL = 86400.0   # 24 小时
 _FONT_CACHE_PATH = Path.home() / ".cache" / "mathoi" / "cjk_font_cache.json"
 
@@ -48,7 +48,7 @@ def _load_cjk_cache_hint() -> dict:
 
 
 def _save_cjk_cache(font_name: Optional[str], font_path: Optional[str] = None) -> None:
-    """将扫描结果写入缓存文件（font="" 也缓存，避免下次再扫）。"""
+    """将探测结果回写缓存文件（font="" 也缓存，避免下次再扫）。"""
     try:
         _FONT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _FONT_CACHE_PATH.write_text(
@@ -63,181 +63,8 @@ def _save_cjk_cache(font_name: Optional[str], font_path: Optional[str] = None) -
         pass
 
 
-def _make_cjk_preamble() -> str:
-    """生成 CJK 字体检测/注入代码。
-
-    - 把缓存中的字体名/路径作为 hint 注入 kernel 代码；
-    - kernel 内仍执行完整的"hint 验证 → 系统已注册 → 文件扫描 → fc-list"四级流程；
-    - 任何路径下都通过 findfont() 验证可解析，避免假阳性。
-    """
-    hint = _load_cjk_cache_hint()
-    return _CJK_DETECT_TEMPLATE.format(
-        hint_font=repr(hint.get("font") or ""),
-        hint_path=repr(hint.get("path") or ""),
-    )
-
-
-# 完整 CJK 字体探测代码（cache hint 优先 → 完整扫描兜底）
-# 扫描结束后打印特殊标记 __MATHOI_CJK__:<font_name>|<font_path>，供主进程回写缓存
-_CJK_DETECT_TEMPLATE = r"""
-import os as _os, subprocess as _sp
-import matplotlib.font_manager as _fm
-
-_HINT_FONT = {hint_font}
-_HINT_PATH = {hint_path}
-
-_CJK_PREFER = [
-    'Noto Sans CJK SC','Noto Sans CJK TC','Noto Sans CJK JP',
-    'Noto Sans SC','Noto Serif CJK SC',
-    'Source Han Sans SC','Source Han Sans CN','Source Han Sans',
-    'Microsoft YaHei','Microsoft YaHei UI',
-    'SimHei','SimSun','FangSong','KaiTi',
-    'WenQuanYi Micro Hei','WenQuanYi Zen Hei','WenQuanYi Bitmap Song',
-    'PingFang SC','Heiti SC','STHeiti','STSong','STFangsong',
-    'HarmonyOS Sans SC','OPPO Sans','MiSans',
-    'Arial Unicode MS','Songti SC','Kaiti SC',
-]
-
-
-def _clear_findfont_cache():
-    try: _fm.fontManager._findfont_cached.cache_clear()
-    except Exception: pass
-
-
-def _verify_font(name):
-    "findfont() 验证：返回非 DejaVu 路径才算解析成功。"
-    if not name:
-        return False
-    _clear_findfont_cache()
-    import warnings as _warnings
-    try:
-        with _warnings.catch_warnings(record=True):
-            _warnings.simplefilter('always')
-            _path = _fm.findfont(name, fallback_to_default=False)
-    except Exception:
-        return False
-    if not _path:
-        return False
-    return 'dejavu' not in _path.lower()
-
-
-_cjk_font = None
-_cjk_path = ''
-
-# ── 1) cache hint：先尝试缓存的字体名 / 路径 ───────────────────────────────────
-if _HINT_PATH and _os.path.isfile(_HINT_PATH):
-    try:
-        _fm.fontManager.addfont(_HINT_PATH)
-        _clear_findfont_cache()
-    except Exception: pass
-if _HINT_FONT and _verify_font(_HINT_FONT):
-    _cjk_font = _HINT_FONT
-    _cjk_path = _HINT_PATH
-
-# ── 2) 系统已注册：在 ttflist 中按优先级匹配 ─────────────────────────────────
-if _cjk_font is None:
-    _installed_names = {{f.name for f in _fm.fontManager.ttflist}}
-    for _name in _CJK_PREFER:
-        if _name in _installed_names and _verify_font(_name):
-            _cjk_font = _name
-            _hits = [f for f in _fm.fontManager.ttflist if f.name == _name]
-            _cjk_path = _hits[0].fname if _hits else ''
-            break
-
-# ── 3) 文件扫描：常见目录搜索关键词 → addfont → 重试匹配 ──────────────────────
-if _cjk_font is None:
-    _CJK_FILE_KW = (
-        'simhei','simsun','simfang','simkai','kaiti','fangsong',
-        'yahei','msyh','msyhbd',
-        'notocjk','notosanscjk','notoserif','noto_cjk',
-        'notosans_cjk','notosanskjk',
-        'wqy','wenquanyi',
-        'sourcehan','source_han',
-        'pingfang','heiti','stheiti','stsong','stfang',
-        'arialuni','arialunicode',
-        'harmonyos','opposans','misans','lxgw',
-    )
-    _FONT_DIRS = [
-        r'C:\Windows\Fonts',
-        '/usr/share/fonts','/usr/local/share/fonts',
-        '/usr/share/fonts/truetype','/usr/share/fonts/opentype',
-        '/usr/share/fonts/noto','/usr/share/fonts/wqy',
-        _os.path.expanduser('~/.fonts'),
-        _os.path.expanduser('~/.local/share/fonts'),
-        '/Library/Fonts','/System/Library/Fonts',
-        _os.path.expanduser('~/Library/Fonts'),
-    ]
-    _registered = []
-    _names_before = {{f.name for f in _fm.fontManager.ttflist}}
-    for _d in _FONT_DIRS:
-        if not _os.path.isdir(_d): continue
-        for _root, _dirs, _fnames in _os.walk(_d):
-            for _fn in _fnames:
-                if not _fn.lower().endswith(('.ttf','.ttc','.otf')): continue
-                if not any(_k in _fn.lower() for _k in _CJK_FILE_KW): continue
-                _fp = _os.path.join(_root, _fn)
-                try:
-                    _fm.fontManager.addfont(_fp); _registered.append(_fp)
-                except Exception: pass
-    if _registered:
-        _clear_findfont_cache()
-        _names_after = {{f.name for f in _fm.fontManager.ttflist}}
-        # 优先 PREFER 列表
-        for _name in _CJK_PREFER:
-            if _name in _names_after and _verify_font(_name):
-                _cjk_font = _name
-                _hits = [f for f in _fm.fontManager.ttflist if f.name == _name]
-                _cjk_path = _hits[0].fname if _hits else ''
-                break
-        # 兜底：取本次新增的任意可用字体
-        if _cjk_font is None:
-            for _name in (_names_after - _names_before):
-                if _verify_font(_name):
-                    _cjk_font = _name
-                    _hits = [f for f in _fm.fontManager.ttflist if f.name == _name]
-                    _cjk_path = _hits[0].fname if _hits else ''
-                    break
-
-# ── 4) fc-list：Linux 兜底（系统配置但 matplotlib 未识别）────────────────────
-if _cjk_font is None:
-    try:
-        _fc_lines = _sp.check_output(
-            ['fc-list', ':lang=zh'], timeout=8, stderr=_sp.DEVNULL
-        ).decode('utf-8', errors='ignore').splitlines()
-        for _fc_line in _fc_lines:
-            _fc_path = _fc_line.split(':')[0].strip()
-            if _fc_path.endswith(('.ttf','.ttc','.otf')) and _os.path.isfile(_fc_path):
-                try:
-                    _fm.fontManager.addfont(_fc_path)
-                    _clear_findfont_cache()
-                    _entry = [f for f in _fm.fontManager.ttflist if f.fname == _fc_path]
-                    if _entry and _verify_font(_entry[0].name):
-                        _cjk_font = _entry[0].name; _cjk_path = _fc_path; break
-                except Exception: pass
-    except Exception: pass
-
-# ── 5) 名称特征兜底 ──────────────────────────────────────────────────────────
-if _cjk_font is None:
-    _kws = ('CJK','Hei','Kai','Song','Ming','Gothic',
-            'Yahei','SimSun','SimHei','Noto','WenQuan',
-            'Source Han','PingFang','Heiti','Harmony','LXGW')
-    for _f in _fm.fontManager.ttflist:
-        if any(_k.lower() in _f.name.lower() for _k in _kws) and _verify_font(_f.name):
-            _cjk_font = _f.name; _cjk_path = _f.fname; break
-
-_sans = [_cjk_font, 'DejaVu Sans'] if _cjk_font else ['DejaVu Sans']
-if _cjk_font:
-    print(f'[Sandbox] CJK font: {{_cjk_font}}')
-    print(f'__MATHOI_CJK__:{{_cjk_font}}|{{_cjk_path}}')
-else:
-    print('[Sandbox] WARNING: 未找到 CJK 字体，中文将显示为方框。')
-    print('__MATHOI_CJK__:|')
-"""
-
 # 清理 ANSI 转义码（traceback 中 colorama 输出会干扰 LLM 理解）
 _ANSI_RE = _re.compile(r"\x1b\[[0-9;]*[mGKHF]")
-
-
 @dataclass
 class ExecResult:
     success: bool
@@ -326,138 +153,18 @@ class JupyterSandbox:
                 self._kc = self._km.client()
                 self._kc.start_channels()
                 await self._kc.wait_for_ready(timeout=_KERNEL_START_TIMEOUT)
-                # 预热：注入工作目录 + 学术 matplotlib 全局配置
-                # CJK 字体检测（缓存命中时走快路径，跳过完整扫描）
-                _cjk_preamble = _make_cjk_preamble()
-                _init_result = await self._silent_exec(
-                    "import os, sys, json, gc\n"
-                    "import warnings, logging\n"
-                    "warnings.filterwarnings('ignore')\n"
-                    # matplotlib.font_manager 通过 logging 而非 warnings 发出告警，
-                    # 单独压制，防止 'findfont: Font family ... not found' 污染 stderr
-                    "logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)\n"
-                    "import matplotlib\n"
-                    "matplotlib.use('Agg')\n"
-                    "import matplotlib.pyplot as plt\n"
-                    f"os.chdir(r'{self.work_dir}')\n"
-                    "\n"
-                    "# ── CJK 字体探测（首次完整扫描，后续缓存命中走快路径）──\n"
-                    + _cjk_preamble + "\n"
-                    "\n"
-                    "# ── 标准学术配色（所有图表统一使用）────────────────────\n"
-                    "COLORS = {\n"
-                    "    'primary':   '#2E5B88',\n"
-                    "    'secondary': '#E85D4C',\n"
-                    "    'tertiary':  '#4A9B7F',\n"
-                    "    'warning':   '#F0A500',\n"
-                    "    'neutral':   '#6B6B6B',\n"
-                    "    'light':     '#B8D4E8',\n"
-                    "    'bg':        '#F7F7F7',\n"
-                    "}\n"
-                    "PALETTE = [COLORS['primary'], COLORS['secondary'], COLORS['tertiary'],\n"
-                    "           COLORS['warning'], COLORS['neutral'], COLORS['light']]\n"
-                    "\n"
-                    "# ── 图幅尺寸常量 ────────────────────────────────────────\n"
-                    "FIG_SINGLE = (6, 4.5)   # 单图\n"
-                    "FIG_DOUBLE = (11, 4.5)  # 左右两图\n"
-                    "FIG_WIDE   = (9, 3.5)   # 宽条形图\n"
-                    "FIG_SQUARE = (6, 6)     # 热力图/散点图\n"
-                    "FIG_TALL   = (5, 7)     # 竖向多子图\n"
-                    "\n"
-                    "# ── 全局 rcParams（学术论文风格，每个任务只设一次）──────\n"
-                    "plt.rcParams.update({\n"
-                    "    # 字体\n"
-                    "    'font.family':          'sans-serif',\n"
-                    "    'font.sans-serif':      _sans,\n"
-                    "    'font.size':            11,\n"
-                    "    'axes.unicode_minus':   False,\n"
-                    "    # 标题 / 标签\n"
-                    "    'axes.titlesize':       12,\n"
-                    "    'axes.titleweight':     'bold',\n"
-                    "    'axes.titlepad':        8,\n"
-                    "    'axes.labelsize':       11,\n"
-                    "    'axes.labelpad':        5,\n"
-                    "    # 轴线\n"
-                    "    'axes.linewidth':       1.0,\n"
-                    "    'axes.spines.top':      False,\n"
-                    "    'axes.spines.right':    False,\n"
-                    "    'axes.edgecolor':       '#444444',\n"
-                    "    # 刻度\n"
-                    "    'xtick.labelsize':      10,\n"
-                    "    'ytick.labelsize':      10,\n"
-                    "    'xtick.major.size':     4,\n"
-                    "    'ytick.major.size':     4,\n"
-                    "    'xtick.minor.visible':  False,\n"
-                    "    'ytick.minor.visible':  False,\n"
-                    "    # 图例\n"
-                    "    'legend.fontsize':      10,\n"
-                    "    'legend.frameon':       False,\n"
-                    "    'legend.loc':           'best',\n"
-                    "    # 网格\n"
-                    "    'axes.grid':            True,\n"
-                    "    'grid.color':           '#DDDDDD',\n"
-                    "    'grid.linewidth':       0.6,\n"
-                    "    'grid.linestyle':       '--',\n"
-                    "    'axes.axisbelow':       True,\n"
-                    "    # 线条 / 标记\n"
-                    "    'lines.linewidth':      1.8,\n"
-                    "    'lines.markersize':     5,\n"
-                    "    'patch.linewidth':      0.8,\n"
-                    "    # 颜色循环\n"
-                    "    'axes.prop_cycle':      plt.cycler(color=PALETTE),\n"
-                    "    # 背景\n"
-                    "    'figure.facecolor':     'white',\n"
-                    "    'axes.facecolor':       'white',\n"
-                    "    # 分辨率\n"
-                    "    'figure.dpi':           120,\n"
-                    "    'savefig.dpi':          300,\n"
-                    "    'savefig.bbox':         'tight',\n"
-                    "    'savefig.pad_inches':   0.15,\n"
-                    "    'savefig.facecolor':    'white',\n"
-                    "})\n"
-                    "\n"
-                    "# ── seaborn 集成（若已安装则对齐主题）───────────────────\n"
-                    "try:\n"
-                    "    import seaborn as sns\n"
-                    "    sns.set_theme(style='ticks', palette=PALETTE, font=_sans[0] if _sans else 'sans-serif')\n"
-                    "    sns.set_context('paper', font_scale=1.1)\n"
-                    "    # set_theme 会重置部分 rcParams，需补丁回覆\n"
-                    "    plt.rcParams['axes.unicode_minus'] = False\n"
-                    "    plt.rcParams['font.sans-serif'] = _sans\n"
-                    "    plt.rcParams['savefig.dpi'] = 300\n"
-                    "    plt.rcParams['savefig.facecolor'] = 'white'\n"
-                    "    plt.rcParams['axes.grid'] = True\n"
-                    "    plt.rcParams['grid.color'] = '#DDDDDD'\n"
-                    "    plt.rcParams['axes.prop_cycle'] = plt.cycler(color=PALETTE)\n"
-                    "    print('[Sandbox] seaborn integrated')\n"
-                    "except ImportError:\n"
-                    "    pass\n"
-                    "\n"
-                    "# ── 便捷辅助函数 ────────────────────────────────────────\n"
-                    "def std_fig(size=FIG_SINGLE):\n"
-                    "    '''创建标准学术图幅，返回 (fig, ax)。'''\n"
-                    "    return plt.subplots(figsize=size)\n"
-                    "\n"
-                    "def save_fig(fname, fig=None):\n"
-                    "    '''保存图片到工作区，自动设置 dpi/bbox。'''\n"
-                    "    (fig or plt.gcf()).savefig(fname, dpi=300, bbox_inches='tight',\n"
-                    "                              facecolor='white')\n"
-                    "    plt.close('all')\n"
-                    "    print(f'[saved] {fname}')\n"
-                    "\n"
-                    "print(f'Sandbox ready | cwd: {os.getcwd()} | font: {_cjk_font or \"fallback\"}')\n"
+                # 预热：注入工作目录 + CJK 探测 + matplotlib 学术风格
+                _hint = _load_cjk_cache_hint()
+                _init_code = build_init_code(
+                    self.work_dir,
+                    hint_font=_hint["font"],
+                    hint_path=_hint["path"],
                 )
-                # 解析缓存标记，回写主进程缓存文件（格式：__MATHOI_CJK__:<font>|<path>）
-                if "__MATHOI_CJK__" in _init_result:
-                    for _line in _init_result.splitlines():
-                        if _line.startswith("__MATHOI_CJK__:"):
-                            _payload = _line.split(":", 1)[1].strip()
-                            if "|" in _payload:
-                                _f, _p = _payload.split("|", 1)
-                            else:
-                                _f, _p = _payload, ""
-                            _save_cjk_cache(_f or None, _p or None)
-                            break
+                _init_result = await self._silent_exec(_init_code)
+                # 解析 sandbox 打印的标记（__MATHOI_CJK__:<font>|<path>），回写主进程缓存
+                _f, _p = parse_cjk_marker(_init_result)
+                if _f or _p:
+                    _save_cjk_cache(_f or None, _p or None)
                 logger.info("Sandbox started (attempt {}) | task={} cwd={}",
                             attempt, self.task_id, self.work_dir)
                 self._start_health_worker()
