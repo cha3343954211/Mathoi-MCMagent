@@ -781,8 +781,29 @@ def _extract_figure_features(agent_output: str, label: str = "") -> str:
     return prefix + "\n\n".join(m.strip() for m in matches)
 
 
+_MD_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)\s*(?:\"[^\"]*\")?\s*\)")
+
+
+def _extract_referenced_images(markdown: str) -> set[str]:
+    """提取 Markdown 中通过 ![](...) 实际嵌入的图片文件名（小写、basename）。
+
+    仅识别真正的 Markdown 图片语法，避免把段落中复述的文件名误判为「已引用」。
+    """
+    refs: set[str] = set()
+    for m in _MD_IMG_RE.finditer(markdown):
+        path = m.group(1).strip().strip("'\"")
+        if not path:
+            continue
+        # 取文件名最后一段，统一小写
+        name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if name:
+            refs.add(name)
+    return refs
+
+
 def _ensure_all_figures_in_paper(paper_md: Path, catalog: list[dict]) -> None:
-    """后处理：把 catalog 中未被 paper.md 引用的图就近追加，避免遗漏断图。
+    """后处理：把 catalog 中未被 paper.md **真正插入**（即出现 ![](file)）的图
+    就近追加，避免遗漏断图。
 
     追加策略（按归属章节）：
     - question==0  (EDA)  → 追加至「描述性统计」章节尾部
@@ -791,11 +812,15 @@ def _ensure_all_figures_in_paper(paper_md: Path, catalog: list[dict]) -> None:
     - 兜底 → 追加至全文末尾
     """
     content = paper_md.read_text(encoding="utf-8")
-    missing_entries = [e for e in catalog if e["file"] not in content]
+    referenced = _extract_referenced_images(content)
+    missing_entries = [e for e in catalog if e["file"].lower() not in referenced]
     if not missing_entries:
         return
 
-    logger.warning("paper.md 遗漏 {} 张图，尝试就近追加", len(missing_entries))
+    logger.warning(
+        "paper.md 遗漏 {} 张图，尝试就近追加：{}",
+        len(missing_entries), [e["file"] for e in missing_entries],
+    )
 
     # 按问题分组
     groups: dict[int, list[dict]] = defaultdict(list)

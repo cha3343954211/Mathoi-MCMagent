@@ -26,29 +26,37 @@ from ..core.logging import logger
 from .notebook import NotebookRecorder
 
 # ---------- CJK 字体缓存 ----------
+# 缓存仅作 "提示"：每次仍在 kernel 内验证字体能被 findfont() 真正解析；
+# 验证失败立即降级到完整扫描，确保不会出现"缓存生效但中文渲染成豆腐方块"的情况。
 _FONT_CACHE_TTL = 86400.0   # 24 小时
 _FONT_CACHE_PATH = Path.home() / ".cache" / "mathoi" / "cjk_font_cache.json"
 
 
-def _load_cjk_cache() -> Optional[str]:
-    """读取本地缓存，有效期内返回字体名，否则返回 None。"""
+def _load_cjk_cache_hint() -> dict:
+    """读取本地缓存，返回 {font, path}（空值表示未知）。"""
     try:
-        if not _FONT_CACHE_PATH.exists():
-            return None
-        data = json.loads(_FONT_CACHE_PATH.read_text(encoding="utf-8"))
-        if time.time() - float(data.get("ts", 0)) < _FONT_CACHE_TTL:
-            return data.get("font") or None
+        if _FONT_CACHE_PATH.exists():
+            data = json.loads(_FONT_CACHE_PATH.read_text(encoding="utf-8"))
+            if time.time() - float(data.get("ts", 0)) < _FONT_CACHE_TTL:
+                return {
+                    "font": str(data.get("font") or ""),
+                    "path": str(data.get("path") or ""),
+                }
     except Exception:
         pass
-    return None
+    return {"font": "", "path": ""}
 
 
-def _save_cjk_cache(font_name: Optional[str]) -> None:
-    """将扫描结果写入缓存文件（font=None 也缓存，避免下次再扫）。"""
+def _save_cjk_cache(font_name: Optional[str], font_path: Optional[str] = None) -> None:
+    """将扫描结果写入缓存文件（font="" 也缓存，避免下次再扫）。"""
     try:
         _FONT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _FONT_CACHE_PATH.write_text(
-            json.dumps({"font": font_name or "", "ts": time.time()}),
+            json.dumps({
+                "font": font_name or "",
+                "path": font_path or "",
+                "ts": time.time(),
+            }),
             encoding="utf-8",
         )
     except Exception:
@@ -56,34 +64,27 @@ def _save_cjk_cache(font_name: Optional[str]) -> None:
 
 
 def _make_cjk_preamble() -> str:
-    """生成 CJK 字体检测/注入代码。若缓存命中则跳过四重扫描，直接注入字体名。"""
-    cached = _load_cjk_cache()
-    if cached:
-        logger.debug("CJK font cache hit: {}", cached)
-        return (
-            f"import matplotlib.font_manager as _fm\n"
-            f"_cjk_font = {repr(cached)}\n"
-            f"_sans = [_cjk_font, 'DejaVu Sans']\n"
-            f"print(f'[Sandbox] CJK font (cached): {cached}')\n"
-        )
-    if cached == "":
-        # 上次扫描也没找到，直接降级
-        logger.debug("CJK font cache: no CJK font found on last scan")
-        return (
-            "_cjk_font = None\n"
-            "_sans = ['DejaVu Sans']\n"
-            "print('[Sandbox] CJK font (cached): none')\n"
-        )
-    # 无缓存或缓存失效 → 完整扫描，结果通过 _MATHOI_CJK_RESULT 变量传回
-    logger.debug("CJK font cache miss, running full scan")
-    return _FULL_CJK_SCAN_CODE
+    """生成 CJK 字体检测/注入代码。
+
+    - 把缓存中的字体名/路径作为 hint 注入 kernel 代码；
+    - kernel 内仍执行完整的"hint 验证 → 系统已注册 → 文件扫描 → fc-list"四级流程；
+    - 任何路径下都通过 findfont() 验证可解析，避免假阳性。
+    """
+    hint = _load_cjk_cache_hint()
+    return _CJK_DETECT_TEMPLATE.format(
+        hint_font=repr(hint.get("font") or ""),
+        hint_path=repr(hint.get("path") or ""),
+    )
 
 
-# 完整 CJK 字体四重扫描代码（模块级常量，避免重复构造）
-# 扫描结束后打印特殊标记 __MATHOI_CJK__:<font_name>，供主进程回写缓存
-_FULL_CJK_SCAN_CODE = r"""
-import subprocess as _sp, os as _os
+# 完整 CJK 字体探测代码（cache hint 优先 → 完整扫描兜底）
+# 扫描结束后打印特殊标记 __MATHOI_CJK__:<font_name>|<font_path>，供主进程回写缓存
+_CJK_DETECT_TEMPLATE = r"""
+import os as _os, subprocess as _sp
 import matplotlib.font_manager as _fm
+
+_HINT_FONT = {hint_font}
+_HINT_PATH = {hint_path}
 
 _CJK_PREFER = [
     'Noto Sans CJK SC','Noto Sans CJK TC','Noto Sans CJK JP',
@@ -96,22 +97,54 @@ _CJK_PREFER = [
     'HarmonyOS Sans SC','OPPO Sans','MiSans',
     'Arial Unicode MS','Songti SC','Kaiti SC',
 ]
-_installed_names = {f.name for f in _fm.fontManager.ttflist}
-_cjk_font = next((f for f in _CJK_PREFER if f in _installed_names), None)
 
-# 检测到候选名后立即清除 _findfont_cached（旧缓存可能包含 "not found" 条目）
-if _cjk_font:
+
+def _clear_findfont_cache():
     try: _fm.fontManager._findfont_cached.cache_clear()
     except Exception: pass
-    # 验证 findfont() 实际能解析（通过 logging 捕获不到 not-found，改用返回值判断）
-    import warnings as _warnings
-    with _warnings.catch_warnings(record=True):
-        _warnings.simplefilter('always')
-        _probe = _fm.findfont(_cjk_font)
-    if not _probe or 'dejavu' in _probe.lower():
-        # findfont 仍回退到 DejaVu Sans：说明系统缓存陈旧，让文件扫描兜底
-        _cjk_font = None
 
+
+def _verify_font(name):
+    "findfont() 验证：返回非 DejaVu 路径才算解析成功。"
+    if not name:
+        return False
+    _clear_findfont_cache()
+    import warnings as _warnings
+    try:
+        with _warnings.catch_warnings(record=True):
+            _warnings.simplefilter('always')
+            _path = _fm.findfont(name, fallback_to_default=False)
+    except Exception:
+        return False
+    if not _path:
+        return False
+    return 'dejavu' not in _path.lower()
+
+
+_cjk_font = None
+_cjk_path = ''
+
+# ── 1) cache hint：先尝试缓存的字体名 / 路径 ───────────────────────────────────
+if _HINT_PATH and _os.path.isfile(_HINT_PATH):
+    try:
+        _fm.fontManager.addfont(_HINT_PATH)
+        _clear_findfont_cache()
+    except Exception: pass
+if _HINT_FONT and _verify_font(_HINT_FONT):
+    _cjk_font = _HINT_FONT
+    _cjk_path = _HINT_PATH
+
+# ── 2) 系统已注册：在 ttflist 中按优先级匹配 ─────────────────────────────────
+if _cjk_font is None:
+    _installed_names = {{f.name for f in _fm.fontManager.ttflist}}
+    for _name in _CJK_PREFER:
+        if _name in _installed_names and _verify_font(_name):
+            _cjk_font = _name
+            _hits = [f for f in _fm.fontManager.ttflist if f.name == _name]
+            _cjk_path = _hits[0].fname if _hits else ''
+            break
+
+# ── 3) 文件扫描：常见目录搜索关键词 → addfont → 重试匹配 ──────────────────────
 if _cjk_font is None:
     _CJK_FILE_KW = (
         'simhei','simsun','simfang','simkai','kaiti','fangsong',
@@ -135,6 +168,7 @@ if _cjk_font is None:
         _os.path.expanduser('~/Library/Fonts'),
     ]
     _registered = []
+    _names_before = {{f.name for f in _fm.fontManager.ttflist}}
     for _d in _FONT_DIRS:
         if not _os.path.isdir(_d): continue
         for _root, _dirs, _fnames in _os.walk(_d):
@@ -146,13 +180,25 @@ if _cjk_font is None:
                     _fm.fontManager.addfont(_fp); _registered.append(_fp)
                 except Exception: pass
     if _registered:
-        try: _fm.fontManager._findfont_cached.cache_clear()
-        except Exception: pass
-        _installed_names2 = {f.name for f in _fm.fontManager.ttflist}
-        _cjk_font = next((f for f in _CJK_PREFER if f in _installed_names2), None)
+        _clear_findfont_cache()
+        _names_after = {{f.name for f in _fm.fontManager.ttflist}}
+        # 优先 PREFER 列表
+        for _name in _CJK_PREFER:
+            if _name in _names_after and _verify_font(_name):
+                _cjk_font = _name
+                _hits = [f for f in _fm.fontManager.ttflist if f.name == _name]
+                _cjk_path = _hits[0].fname if _hits else ''
+                break
+        # 兜底：取本次新增的任意可用字体
         if _cjk_font is None:
-            _cjk_font = next(iter(_installed_names2 - _installed_names), None)
+            for _name in (_names_after - _names_before):
+                if _verify_font(_name):
+                    _cjk_font = _name
+                    _hits = [f for f in _fm.fontManager.ttflist if f.name == _name]
+                    _cjk_path = _hits[0].fname if _hits else ''
+                    break
 
+# ── 4) fc-list：Linux 兜底（系统配置但 matplotlib 未识别）────────────────────
 if _cjk_font is None:
     try:
         _fc_lines = _sp.check_output(
@@ -163,27 +209,29 @@ if _cjk_font is None:
             if _fc_path.endswith(('.ttf','.ttc','.otf')) and _os.path.isfile(_fc_path):
                 try:
                     _fm.fontManager.addfont(_fc_path)
-                    _fc_entry = [e for e in _fm.fontManager.ttflist if e.fname == _fc_path]
-                    if _fc_entry:
-                        _cjk_font = _fc_entry[0].name; break
+                    _clear_findfont_cache()
+                    _entry = [f for f in _fm.fontManager.ttflist if f.fname == _fc_path]
+                    if _entry and _verify_font(_entry[0].name):
+                        _cjk_font = _entry[0].name; _cjk_path = _fc_path; break
                 except Exception: pass
     except Exception: pass
 
+# ── 5) 名称特征兜底 ──────────────────────────────────────────────────────────
 if _cjk_font is None:
     _kws = ('CJK','Hei','Kai','Song','Ming','Gothic',
             'Yahei','SimSun','SimHei','Noto','WenQuan',
             'Source Han','PingFang','Heiti','Harmony','LXGW')
-    _candidates = [f.name for f in _fm.fontManager.ttflist
-                   if any(k.lower() in f.name.lower() for k in _kws)]
-    _cjk_font = _candidates[0] if _candidates else None
+    for _f in _fm.fontManager.ttflist:
+        if any(_k.lower() in _f.name.lower() for _k in _kws) and _verify_font(_f.name):
+            _cjk_font = _f.name; _cjk_path = _f.fname; break
 
 _sans = [_cjk_font, 'DejaVu Sans'] if _cjk_font else ['DejaVu Sans']
 if _cjk_font:
-    print(f'[Sandbox] CJK font: {_cjk_font}')
-    print(f'__MATHOI_CJK__:{_cjk_font}')
+    print(f'[Sandbox] CJK font: {{_cjk_font}}')
+    print(f'__MATHOI_CJK__:{{_cjk_font}}|{{_cjk_path}}')
 else:
     print('[Sandbox] WARNING: 未找到 CJK 字体，中文将显示为方框。')
-    print('__MATHOI_CJK__:')
+    print('__MATHOI_CJK__:|')
 """
 
 # 清理 ANSI 转义码（traceback 中 colorama 输出会干扰 LLM 理解）
@@ -399,12 +447,16 @@ class JupyterSandbox:
                     "\n"
                     "print(f'Sandbox ready | cwd: {os.getcwd()} | font: {_cjk_font or \"fallback\"}')\n"
                 )
-                # 解析缓存标记（仅完整扫描时出现），回写主进程缓存文件
+                # 解析缓存标记，回写主进程缓存文件（格式：__MATHOI_CJK__:<font>|<path>）
                 if "__MATHOI_CJK__" in _init_result:
                     for _line in _init_result.splitlines():
                         if _line.startswith("__MATHOI_CJK__:"):
-                            _detected = _line.split(":", 1)[1].strip()
-                            _save_cjk_cache(_detected or None)
+                            _payload = _line.split(":", 1)[1].strip()
+                            if "|" in _payload:
+                                _f, _p = _payload.split("|", 1)
+                            else:
+                                _f, _p = _payload, ""
+                            _save_cjk_cache(_f or None, _p or None)
                             break
                 logger.info("Sandbox started (attempt {}) | task={} cwd={}",
                             attempt, self.task_id, self.work_dir)
